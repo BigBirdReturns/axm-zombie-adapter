@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "axm-zombie-adapter"
-version = "0.1.0"
-description = "AXM control-plane adapter for zombie compute style multi-GPU inference rigs"
+version = "0.3.0"
+description = "Bandwidth aware control plane for pipeline-parallel LLM inference on consumer GPU clusters"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-  "pyyaml>=6.0",
-]
+license = {text = "MIT"}
+authors = [{name="Jonathan Sandhu"}]
+dependencies = ["pyyaml>=6.0"]
 
 [project.scripts]
 axm-zombie = "axm_zombie.cli:main"
 
-[tool.setuptools]
-packages = ["axm_zombie", "axm_zombie.exporter", "axm_zombie.runtime"]
+[tool.setuptools.packages.find]
+where = ["src"]

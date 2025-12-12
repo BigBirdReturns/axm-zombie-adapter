@@ -1,50 +1,68 @@
 # axm-zombie-adapter
 
-AXM Zombie Adapter is a small control-plane module that compiles a cluster manifest into an executable inference plan for multi-GPU, multi-node "zombie compute" rigs.
+A lightweight control plane for Zombie Compute style consumer GPU clusters.
 
-It focuses on the gap that shows up immediately after "we can chain GPUs": arbitration, placement, and repeatable execution under bandwidth and VRAM constraints.
+This project is an independent adapter. It is not affiliated with Navigator's Log and it does not reproduce any paid dossier content. It implements the integration surface discussed publicly: pipeline parallel inference across multiple GPUs with bandwidth-first planning.
 
 ## What it does
 
-- Loads a `cluster.yaml` manifest
-- Produces a deterministic `plan.json`
-- Emits a `run_torchrun.sh` launcher script (first supported exporter)
-- Includes a simple monitor loop scaffold for tokens/sec and error-triggered replans (optional)
+It turns "I have some GPUs" into a repeatable, inspectable plan:
+
+1) Ingest a cluster and model manifest (YAML)
+2) Generate a placement plan (plan.json)
+3) Export launch scaffolds and placement notes for an execution engine (EXO or Petals)
+
+This repo is intentionally not an execution engine. You still install and run EXO or Petals separately.
+
+## Why it is useful
+
+Zombie Compute as a concept assumes the builder will manually decide:
+- how to shard a model into pipeline stages
+- where stage boundaries should go given link bandwidth
+- how much KV cache headroom to reserve
+- what to do when a GPU OOMs or a node drops
+
+This adapter makes those decisions explicit and diffable through artifacts:
+- `cluster.yaml` captures topology and constraints
+- `plan.json` captures placements and policies
+- exporters turn the plan into runnable scaffolds and notes
 
 ## Quickstart
 
-### 1) Install
+### 1) Create a manifest
+
+Start with one of these:
+- `examples/cluster_4x3090_singlebox.yaml`
+- `examples/cluster_4x3090_2nodes_10gbe.yaml`
+
+### 2) Generate a plan
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+axm-zombie plan examples/cluster_4x3090_singlebox.yaml --out plan.json
 ```
 
-### 2) Build a plan
+### 3) Export launch scaffolds
 
+EXO:
 ```bash
-axm-zombie plan examples/cluster_4x3090.yaml --out plan.json
+axm-zombie export exo plan.json --outdir out_exo
 ```
 
-### 3) Export a launcher
-
+Petals:
 ```bash
-axm-zombie export torchrun plan.json --out run_torchrun.sh
-bash run_torchrun.sh
+axm-zombie export petals plan.json --outdir out_petals
 ```
 
-## Manifest
+## Model and cluster notes
 
-See `examples/cluster_4x3090.yaml`.
+- The planner is heuristic on purpose. It stays conservative and it favors bandwidth locality.
+- For multi-node rigs, stage boundaries across nodes are expensive unless you have real interconnect (10GbE or better).
+- KV cache headroom matters. The planner reserves a fixed default per GPU, and you should tune it per model and batch.
 
-## Notes
+## References
 
-This repo intentionally avoids coupling to any proprietary package. If you later obtain the Zombie Compute Kit dossier, you can map its assumptions (pipeline strategy, preferred stack, benchmarking targets) into:
-
-- `axm_zombie/cost.py`
-- `axm_zombie/planner.py`
-- `axm_zombie/exporter/*`
+- EXO: https://github.com/exo-explore/exo
+- Petals: https://github.com/bigscience-workshop/petals
 
 ## License
 
