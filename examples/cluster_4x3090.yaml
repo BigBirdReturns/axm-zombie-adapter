@@ -30,7 +30,7 @@ cluster:
 
 model:
   name: llama-70b
-  dtype: fp16
+  dtype: q4
   kv_cache: fp16
 
 policy:

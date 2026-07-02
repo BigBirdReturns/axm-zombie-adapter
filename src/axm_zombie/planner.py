@@ -14,8 +14,17 @@ def _estimate_model_bytes(model_name: str, dtype: str) -> int:
         params = 7_000_000_000
     else:
         params = 30_000_000_000
-    bytes_per_param = {"fp16": 2, "bf16": 2, "fp32": 4}.get(dtype.lower(), 2)
-    return params * bytes_per_param
+    bytes_per_param = {
+        "fp32": 4.0,
+        "fp16": 2.0,
+        "bf16": 2.0,
+        "fp8": 1.0,
+        "int8": 1.0,
+        "q8": 1.0,
+        "int4": 0.5,
+        "q4": 0.5,
+    }.get(dtype.lower(), 2.0)
+    return int(params * bytes_per_param)
 
 def _cluster_gpus(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
     gpus: List[Dict[str, Any]] = []
@@ -104,6 +113,7 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     return {
+        "schema_version": 1,
         "model": {
             "name": model["name"],
             "dtype": model["dtype"],
