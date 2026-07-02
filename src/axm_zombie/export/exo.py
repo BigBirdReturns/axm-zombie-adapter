@@ -20,7 +20,7 @@ def export_exo(plan: Dict[str, Any], outdir: Path) -> None:
     lines.append("")
     lines.append("## Stage placement")
     for st in plan["pipeline_stages"]:
-        devices = ", ".join([f"{p['node']}:cuda:{p['gpu']}" for p in st["placement"]])
+        devices = ", ".join([f"{p['node']}:gpu:{p['gpu']}" for p in st["placement"]])
         lines.append(f"Stage {st['stage']}: {devices}")
     lines.append("")
     lines.append("Bandwidth guidance:")
@@ -33,14 +33,14 @@ def export_exo(plan: Dict[str, Any], outdir: Path) -> None:
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         "",
-        "echo "EXO scaffolds written:"",
-        "echo "  - plan.json"",
-        "echo "  - exo_notes.md"",
+        'echo "EXO scaffolds written:"',
+        'echo "  - plan.json"',
+        'echo "  - exo_notes.md"',
         "echo",
-        "echo "Next:"",
-        "echo "1) Install EXO on each node (see https://github.com/exo-explore/exo)"",
-        "echo "2) Ensure node discovery works"",
-        "echo "3) Apply stage placement from exo_notes.md in your EXO shard config"",
+        'echo "Next:"',
+        'echo "1) Install EXO on each node (see https://github.com/exo-explore/exo)"',
+        'echo "2) Ensure node discovery works"',
+        'echo "3) Apply stage placement from exo_notes.md in your EXO shard config"',
         "",
     ])
     p = outdir / "run_node.sh"

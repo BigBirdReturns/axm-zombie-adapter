@@ -1,15 +1,38 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict
-import yaml
+import json
+
+SCHEMA_VERSION = 1
 
 REQUIRED_TOP = ["cluster", "model", "policy"]
 
+def _parse(path: Path) -> Any:
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        return json.loads(text)
+    try:
+        import yaml
+    except ImportError as e:
+        raise RuntimeError(
+            "PyYAML is not installed. Install the yaml extra "
+            "(pip install 'axm-zombie-adapter[yaml]') or provide the manifest as .json."
+        ) from e
+    return yaml.safe_load(text)
+
 def load_manifest(path: str, strict: bool = False) -> Dict[str, Any]:
     p = Path(path)
-    data = yaml.safe_load(p.read_text(encoding="utf-8"))
+    data = _parse(p)
     if not isinstance(data, dict):
-        raise ValueError("Manifest must be a YAML mapping.")
+        raise ValueError("Manifest must be a mapping.")
+
+    data.setdefault("schema_version", SCHEMA_VERSION)
+    if int(data["schema_version"]) != SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported manifest schema_version {data['schema_version']}; "
+            f"this reader supports version {SCHEMA_VERSION}. See SPEC.md."
+        )
+
     for k in REQUIRED_TOP:
         if k not in data:
             raise ValueError(f"Missing top-level key: {k}")

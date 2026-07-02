@@ -20,7 +20,7 @@ def export_petals(plan: Dict[str, Any], outdir: Path) -> None:
     lines.append("")
     lines.append("## Stage placement")
     for st in plan["pipeline_stages"]:
-        devices = ", ".join([f"{p['node']}:cuda:{p['gpu']}" for p in st["placement"]])
+        devices = ", ".join([f"{p['node']}:gpu:{p['gpu']}" for p in st["placement"]])
         lines.append(f"Stage {st['stage']}: {devices}")
     lines.append("")
     lines.append("Bandwidth guidance:")
@@ -33,16 +33,16 @@ def export_petals(plan: Dict[str, Any], outdir: Path) -> None:
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         "",
-        "echo "Petals scaffolds written:"",
-        "echo "  - plan.json"",
-        "echo "  - petals_notes.md"",
+        'echo "Petals scaffolds written:"',
+        'echo "  - plan.json"',
+        'echo "  - petals_notes.md"',
         "echo",
-        "echo "Example (edit for your model):"",
-        "echo "python -m venv .venv && source .venv/bin/activate"",
-        "echo "pip install -U petals"",
+        'echo "Example (edit for your model):"',
+        'echo "python -m venv .venv && source .venv/bin/activate"',
+        'echo "pip install -U petals"',
         "echo",
-        "echo "# Serve a shard (choose a layer range):"",
-        "echo "# python -m petals.cli.run_server --model <model_name> --device cuda --num_blocks <N> --block_idx <i>"",
+        'echo "# Serve a shard (choose a layer range):"',
+        'echo "# python -m petals.cli.run_server --model <model_name> --device cuda --num_blocks <N> --block_idx <i>"',
         "",
     ])
     p = outdir / "run_petals.sh"

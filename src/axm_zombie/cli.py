@@ -6,6 +6,13 @@ from .manifest import load_manifest
 from .planner import build_plan
 from .export.exo import export_exo
 from .export.petals import export_petals
+from .export.torchrun import export_torchrun
+
+EXPORTERS = {
+    "exo": export_exo,
+    "petals": export_petals,
+    "torchrun": export_torchrun,
+}
 
 def main():
     parser = argparse.ArgumentParser(
@@ -14,13 +21,13 @@ def main():
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_plan = sub.add_parser("plan", help="Generate plan.json from cluster manifest YAML")
-    p_plan.add_argument("manifest", help="Path to cluster manifest YAML")
+    p_plan = sub.add_parser("plan", help="Generate plan.json from a cluster manifest (YAML or JSON)")
+    p_plan.add_argument("manifest", help="Path to cluster manifest (.yaml or .json)")
     p_plan.add_argument("--out", default="plan.json", help="Output plan.json path")
     p_plan.add_argument("--strict", action="store_true", help="Fail on missing optional fields")
 
     p_exp = sub.add_parser("export", help="Export scaffolds and notes from plan.json")
-    p_exp.add_argument("target", choices=["exo", "petals"], help="Exporter target")
+    p_exp.add_argument("target", choices=sorted(EXPORTERS), help="Exporter target")
     p_exp.add_argument("plan", help="Path to plan.json")
     p_exp.add_argument("--outdir", default="out", help="Output directory")
 
@@ -38,9 +45,6 @@ def main():
         plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
         outdir = Path(args.outdir)
         outdir.mkdir(parents=True, exist_ok=True)
-        if args.target == "exo":
-            export_exo(plan, outdir)
-        else:
-            export_petals(plan, outdir)
+        EXPORTERS[args.target](plan, outdir)
         print(f"Wrote exporter artifacts to {outdir.resolve()}")
         return

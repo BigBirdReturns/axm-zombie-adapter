@@ -29,11 +29,21 @@ This adapter makes those decisions explicit and diffable through artifacts:
 
 ## Quickstart
 
+### 0) Install
+
+```bash
+pip install -e .          # zero dependencies; JSON manifests work out of the box
+pip install -e '.[yaml]'  # optional: YAML manifest support
+```
+
 ### 1) Create a manifest
 
 Start with one of these:
-- `examples/cluster_4x3090_singlebox.yaml`
+- `examples/cluster_4x3090_singlebox.yaml` (or the equivalent `.json`)
 - `examples/cluster_4x3090_2nodes_10gbe.yaml`
+
+Manifests may be YAML or JSON; they are semantically identical and produce
+byte-identical plans. The format is defined in `SPEC.md`.
 
 ### 2) Generate a plan
 
@@ -53,16 +63,40 @@ Petals:
 axm-zombie export petals plan.json --outdir out_petals
 ```
 
+torchrun:
+```bash
+axm-zombie export torchrun plan.json --outdir out_torchrun
+```
+
+### Verify the toolchain
+
+```bash
+python tests/golden_check.py
+```
+
+This is the resurrection test: no network, no third-party dependencies. It
+builds a plan from the JSON example, checks it is byte-identical to the
+committed golden file, and runs every exporter.
+
 ## Model and cluster notes
 
 - The planner is heuristic on purpose. It stays conservative and it favors bandwidth locality.
 - For multi-node rigs, stage boundaries across nodes are expensive unless you have real interconnect (10GbE or better).
 - KV cache headroom matters. The planner reserves a fixed default per GPU, and you should tune it per model and batch.
 
+## Longevity
+
+- `SPEC.md` defines the manifest and plan schemas (version 1). The artifacts
+  are the durable interface; the code is a reference implementation.
+- `DURABILITY.md` is the endstate analysis and 30-year durability plan.
+
 ## References
 
 - EXO: https://github.com/exo-explore/exo
 - Petals: https://github.com/bigscience-workshop/petals
+
+Both upstream engines are cited as integration targets, not dependencies;
+nothing in this repo requires them to exist.
 
 ## License
 

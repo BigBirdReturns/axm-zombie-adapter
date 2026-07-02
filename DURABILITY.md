@@ -157,6 +157,18 @@ out wholesale without touching topology.
 ### Phase 0 — Repair the foundation (now, 2026)
 The repo must first reach its own design floor (E4). Concretely:
 
+> **Status: executed in 0.4.0.** Root tree deleted (`src/` is canonical, with
+> the torchrun exporter ported over and fixed); exporter syntax errors fixed;
+> schema frozen as version 1 in SPEC.md with `schema_version` stamped into
+> manifests and plans; golden-file contract tests added, including a
+> stdlib-only resurrection test (`python tests/golden_check.py`); JSON
+> manifests supported natively and PyYAML moved to an optional extra, so the
+> core has zero dependencies. One addition beyond the list below: the model
+> size estimator learned quantized dtypes (q4/int4/q8/int8/fp8), because the
+> flagship 4×3090 examples were infeasible at fp16 — the quickstart now
+> completes because the plan is actually placeable, not because the check was
+> loosened.
+
 1. Delete the divergent root `axm_zombie/` tree; `src/` layout is canonical
    (fold the root tree's `cost.py`/`types.py` improvements into `src/` first).
 2. Fix the quoting syntax errors in `src/axm_zombie/export/exo.py` and
