@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO / "src"))
 from axm_zombie.manifest import load_manifest  # noqa: E402
 from axm_zombie.planner import build_plan  # noqa: E402
 from axm_zombie.export.exo import export_exo  # noqa: E402
+from axm_zombie.export.llamacpp import export_llamacpp  # noqa: E402
 from axm_zombie.export.petals import export_petals  # noqa: E402
 from axm_zombie.export.torchrun import export_torchrun  # noqa: E402
 
@@ -44,9 +45,20 @@ def check_exporters(manifest_path: Path) -> None:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td)
         export_exo(plan, out)
+        export_llamacpp(plan, out)
         export_petals(plan, out)
         export_torchrun(plan, out)
-        for f in ["plan.json", "exo_notes.md", "run_node.sh", "petals_notes.md", "run_petals.sh", "run_torchrun.sh"]:
+        for f in [
+            "plan.json",
+            "exo_notes.md",
+            "run_node.sh",
+            "llamacpp_notes.md",
+            "run_rpc_workers.sh",
+            "run_llamacpp_host.sh",
+            "petals_notes.md",
+            "run_petals.sh",
+            "run_torchrun.sh",
+        ]:
             if not (out / f).exists():
                 raise AssertionError(f"Exporter did not write {f}")
 

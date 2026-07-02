@@ -53,6 +53,11 @@ axm-zombie plan examples/cluster_4x3090_singlebox.yaml --out plan.json
 
 ### 3) Export launch scaffolds
 
+llama.cpp RPC (recommended — actively maintained upstream):
+```bash
+axm-zombie export llamacpp plan.json --outdir out_llamacpp
+```
+
 EXO:
 ```bash
 axm-zombie export exo plan.json --outdir out_exo
@@ -67,6 +72,23 @@ torchrun:
 ```bash
 axm-zombie export torchrun plan.json --outdir out_torchrun
 ```
+
+### 4) When hardware dies
+
+A dead GPU or node is a manifest edit plus a re-plan, never a hand-edited
+plan:
+
+```bash
+# GPU 3 on node-a died:
+axm-zombie replan examples/cluster_4x3090_singlebox.yaml \
+  --lose node-a:3 --out plan.json --manifest-out cluster_degraded.json
+
+# Whole node gone:
+axm-zombie replan cluster.yaml --lose node-b --out plan.json
+```
+
+If the model no longer fits the surviving hardware, the planner says so
+instead of emitting a plan that will OOM.
 
 ### Verify the toolchain
 
@@ -89,9 +111,12 @@ committed golden file, and runs every exporter.
 - `SPEC.md` defines the manifest and plan schemas (version 1). The artifacts
   are the durable interface; the code is a reference implementation.
 - `DURABILITY.md` is the endstate analysis and 30-year durability plan.
+- `recipes/` pins last-known-good driver stacks per GPU architecture before
+  vendors drop them.
 
 ## References
 
+- llama.cpp: https://github.com/ggml-org/llama.cpp
 - EXO: https://github.com/exo-explore/exo
 - Petals: https://github.com/bigscience-workshop/petals
 

@@ -182,6 +182,18 @@ The repo must first reach its own design floor (E4). Concretely:
 
 ### Phase 1 — The Ampere wave (2026–2030)
 3090s, P40s, and first A100 cast-offs are the fleet. Priorities:
+
+> **Status: core delivered in 0.5.0.** A llama.cpp RPC exporter (the first
+> actively-maintained engine target) generates per-node `rpc-server` worker
+> scaffolds and a VRAM-proportional `--tensor-split` host launcher; EXO and
+> Petals exporters remain as frozen plugins. The loss loop is automated as
+> `axm-zombie replan --lose NODE[:GPU]` — degrade the manifest, re-plan,
+> optionally emit the degraded manifest as the new source of truth, and
+> refuse honestly when the model no longer fits the survivors. The freeze
+> recipe library exists at `recipes/` with the format rules and a Pascal
+> template awaiting hardware verification. Still open in this phase: filling
+> recipe checksums from a real archive, and wiring a live health signal
+> (nvidia-smi/engine logs) to trigger `replan` automatically.
 - Replace the dead-engine monoculture: add exporters for whatever is actually
   alive (llama.cpp RPC clusters at minimum), keep EXO/Petals exporters as
   frozen plugins, clearly labeled with their upstreams' status.
