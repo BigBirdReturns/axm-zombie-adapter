@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>axm-zombie-adapter — a control plane for zombie compute</title>
+<meta name="description" content="Turn salvaged consumer GPUs into a repeatable, inspectable inference plan. Manifest in, plan.json out, launch scaffolds for llama.cpp RPC and friends.">
+<style>
+  :root {
+    --surface-0: #111110;
+    --surface-1: #1a1a19;
+    --surface-2: #242422;
+    --border:    #383835;
+    --ink-1:     #ffffff;
+    --ink-2:     #c3c2b7;
+    --ink-3:     #8a897f;
+    --accent:    #3987e5;
+    --accent-2:  #199e70;
+    --good:      #0ca30c;
+    --warning:   #fab219;
+    --critical:  #d03b3b;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--surface-0);
+    color: var(--ink-2);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1000px; margin: 0 auto; padding: 0 20px 80px; }
+  h1, h2, h3 { color: var(--ink-1); line-height: 1.2; }
+  h2 { margin-top: 64px; font-size: 26px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: var(--mono); font-size: 13.5px; }
+  code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+  pre {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+
+  .hero { padding: 72px 0 8px; }
+  .hero h1 { font-size: 40px; margin: 0 0 8px; font-family: var(--mono); }
+  .hero .tag { font-size: 20px; color: var(--ink-2); max-width: 46em; }
+  .hero .links { margin-top: 20px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface-1); color: var(--ink-1); font-size: 14px; cursor: pointer;
+    font-family: inherit;
+  }
+  .btn:hover { border-color: var(--ink-3); text-decoration: none; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { filter: brightness(1.1); }
+
+  .flow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 20px; }
+  .flow .step {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+  }
+  .flow .step .n { color: var(--ink-3); font-family: var(--mono); font-size: 12px; }
+  .flow .step strong { color: var(--ink-1); display: block; margin: 4px 0 6px; }
+  .flow .step p { margin: 0; font-size: 14px; color: var(--ink-2); }
+
+  /* ------- demo ------- */
+  .demo {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin-top: 20px;
+  }
+  .presets { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+  .presets .label { font-size: 13px; color: var(--ink-3); margin-right: 4px; }
+  .preset { font-size: 13px; padding: 6px 12px; }
+  .preset[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+  .demo-grid { display: grid; grid-template-columns: minmax(300px, 5fr) 7fr; gap: 16px; }
+  @media (max-width: 820px) {
+    .demo-grid { grid-template-columns: 1fr; }
+    .flow { grid-template-columns: 1fr; }
+  }
+  .panel-title {
+    font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3);
+    margin: 0 0 8px;
+  }
+  textarea#manifest {
+    width: 100%; min-height: 380px; resize: vertical;
+    background: var(--surface-0); color: var(--ink-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+  }
+  textarea#manifest:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .editor-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .stat {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 14px; min-width: 96px;
+  }
+  .stat .v { color: var(--ink-1); font-size: 20px; font-family: var(--mono); }
+  .stat .k { color: var(--ink-3); font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; }
+
+  .banner {
+    border-radius: 8px; padding: 10px 14px; font-size: 14px; margin-bottom: 14px;
+    border: 1px solid var(--critical); color: var(--ink-1); background: color-mix(in srgb, var(--critical) 12%, var(--surface-1));
+  }
+  .banner::before { content: "✕ "; color: var(--critical); font-weight: 700; }
+  .banner.hidden { display: none; }
+
+  .stages { display: flex; flex-direction: column; gap: 0; }
+  .stage {
+    border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface-0);
+  }
+  .stage .stage-h { font-family: var(--mono); font-size: 12px; color: var(--ink-3); margin-bottom: 8px; }
+  .stage .cards { display: flex; gap: 8px; flex-wrap: wrap; }
+  .boundary {
+    text-align: center; font-family: var(--mono); font-size: 12px; color: var(--ink-3); padding: 4px 0;
+  }
+  .boundary .warn { color: var(--warning); }
+
+  .gpu {
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface-2);
+    cursor: pointer; min-width: 128px; text-align: left; color: var(--ink-2); font-family: var(--mono);
+    font-size: 12px; line-height: 1.45;
+  }
+  .gpu:hover { border-color: var(--ink-3); }
+  .gpu:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .gpu .id { color: var(--ink-1); font-weight: 600; }
+  .gpu .meta { color: var(--ink-3); }
+  .gpu.dead { border-color: var(--critical); background: color-mix(in srgb, var(--critical) 10%, var(--surface-2)); }
+  .gpu.dead .id { color: var(--critical); text-decoration: line-through; }
+  .gpu .dead-tag { display: none; color: var(--critical); font-weight: 700; }
+  .gpu.dead .dead-tag { display: inline; }
+  .hint { font-size: 13px; color: var(--ink-3); margin: 10px 0 0; }
+
+  details.plan-out { margin-top: 16px; }
+  details.plan-out summary { cursor: pointer; color: var(--ink-1); font-size: 14px; }
+  details.plan-out pre { margin-top: 10px; max-height: 420px; overflow: auto; }
+
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 20px; }
+  @media (max-width: 820px) { .cols { grid-template-columns: 1fr; } }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .card strong { color: var(--ink-1); }
+  .card p { font-size: 14px; margin: 6px 0 0; }
+
+  footer {
+    border-top: 1px solid var(--border); margin-top: 72px; padding-top: 24px;
+    font-size: 13.5px; color: var(--ink-3);
+  }
+</style>
+</head>
+<body>
+<main>
+
+  <div class="hero">
+    <h1>axm-zombie-adapter</h1>
+    <p class="tag">A lightweight control plane for zombie compute: turn salvaged consumer GPUs
+    into a repeatable, inspectable inference plan. GPUs rarely die of physics — they die of
+    driver EOL and software churn. This tool keeps the knowledge of how to run them in
+    plain-text artifacts built to outlive every engine, vendor stack, and maintainer.</p>
+    <div class="links">
+      <a class="btn primary" href="#demo">Try the demo</a>
+      <a class="btn" href="https://github.com/BigBirdReturns/axm-zombie-adapter">GitHub</a>
+      <a class="btn" href="https://github.com/BigBirdReturns/axm-zombie-adapter/blob/main/SPEC.md">Schema spec</a>
+      <a class="btn" href="https://github.com/BigBirdReturns/axm-zombie-adapter/blob/main/DURABILITY.md">30-year plan</a>
+    </div>
+  </div>
+
+  <h2>What it does</h2>
+  <p>It turns “I have some GPUs” into artifacts you can diff, version, and hand to an execution
+  engine. The adapter is intentionally <em>not</em> an engine — it makes the placement decisions
+  explicit, then exports scaffolds for whatever actually runs the model.</p>
+  <div class="flow">
+    <div class="step"><span class="n">1 — cluster.yaml / .json</span><strong>Describe the hardware</strong>
+      <p>Nodes, GPUs, VRAM, memory bandwidth, network links. Physics only — no vendor, no engine.</p></div>
+    <div class="step"><span class="n">2 — plan.json</span><strong>Generate a placement plan</strong>
+      <p>Deterministic, bandwidth-first pipeline stages with KV-cache headroom. Same manifest, byte-identical plan, forever.</p></div>
+    <div class="step"><span class="n">3 — scaffolds</span><strong>Export &amp; launch</strong>
+      <p>Launch scripts and placement notes for llama.cpp RPC, EXO, Petals, or torchrun. Engines are plugins; plans never name one.</p></div>
+  </div>
+
+  <h2 id="demo">Live demo — plan a salvage cluster</h2>
+  <p>This is the actual planner, ported line-for-line to JavaScript and verified against the
+  reference implementation’s golden files. It runs entirely in your browser — no server, no
+  dependencies, one HTML file. Edit the manifest, or <strong>click a GPU to kill it</strong> and
+  watch the plan reroute; when too much hardware dies, the planner refuses honestly instead of
+  emitting a plan that will OOM.</p>
+
+  <div class="demo">
+    <div class="presets" role="group" aria-label="Example clusters">
+      <span class="label">Presets:</span>
+      <button class="btn preset" data-preset="singlebox" aria-pressed="true">Single box · 4×3090</button>
+      <button class="btn preset" data-preset="twonode" aria-pressed="false">Two nodes · 10GbE</button>
+      <button class="btn preset" data-preset="mixed" aria-pressed="false">Mixed salvage</button>
+    </div>
+
+    <div class="demo-grid">
+      <div>
+        <p class="panel-title">Cluster manifest (schema v1, JSON)</p>
+        <textarea id="manifest" spellcheck="false" aria-label="Cluster manifest JSON"></textarea>
+        <div class="editor-actions">
+          <button class="btn primary" id="apply">Generate plan</button>
+          <button class="btn" id="revive">Revive all GPUs</button>
+        </div>
+      </div>
+
+      <div>
+        <p class="panel-title">Placement</p>
+        <div class="stats" id="stats" aria-live="polite"></div>
+        <div class="banner hidden" id="banner" role="alert"></div>
+        <div class="stages" id="stages"></div>
+        <p class="hint" id="hint">Click any GPU card to simulate its death. The planner degrades the
+        manifest and replans — the same thing <code>axm-zombie replan --lose node:gpu</code> does.</p>
+        <details class="plan-out">
+          <summary>plan.json</summary>
+          <pre><code id="planjson"></code></pre>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <h2>Quickstart (the real thing)</h2>
+  <pre><code>pip install -e .            # zero dependencies; add '.[yaml]' for YAML manifests
+
+axm-zombie plan examples/cluster_4x3090_singlebox.yaml --out plan.json
+axm-zombie export llamacpp plan.json --outdir out_llamacpp
+
+# GPU 3 on node-a died:
+axm-zombie replan cluster.yaml --lose node-a:3 --out plan.json --manifest-out cluster.json
+
+# Prove the toolchain is alive (no network, no third-party deps):
+python tests/golden_check.py</code></pre>
+
+  <h2>Built to survive</h2>
+  <div class="cols">
+    <div class="card"><strong>Artifacts are the API.</strong>
+      <p>Plain-text manifests and plans with a frozen, versioned schema (<a href="https://github.com/BigBirdReturns/axm-zombie-adapter/blob/main/SPEC.md">SPEC.md</a>).
+      The code is a reference implementation — this page’s demo is the proof: the planner was
+      reimplemented in another language from the spec and produces identical plans.</p></div>
+    <div class="card"><strong>Engines are presumed mortal.</strong>
+      <p>Both original export targets stalled upstream within two years. Exporters are disposable
+      plugins; the plan never names an engine. llama.cpp RPC is the current living target.</p></div>
+    <div class="card"><strong>Zero dependencies, offline forever.</strong>
+      <p>The core runs on the Python standard library alone. A one-command resurrection test proves
+      the toolchain works from a bare clone with no network and no maintainer.</p></div>
+    <div class="card"><strong>Dead hardware is boring.</strong>
+      <p>A dead GPU is a manifest edit plus a replan, never an architecture meeting. Freeze recipes
+      pin last-known-good driver stacks before vendors drop them
+      (<a href="https://github.com/BigBirdReturns/axm-zombie-adapter/tree/main/recipes">recipes/</a>).</p></div>
+  </div>
+
+  <footer>
+    <p>MIT licensed. The Python implementation in the
+    <a href="https://github.com/BigBirdReturns/axm-zombie-adapter">repository</a> is normative;
+    this page is a faithful port for demonstration. No trackers, no CDN, no external requests —
+    this page will render as long as browsers render HTML.</p>
+  </footer>
+
+</main>
+
+<script src="planner.js"></script>
+<script>
+(function () {
+  "use strict";
+  const { normalizeManifest, buildPlan, degradeManifest, linkBwBetween } = window.axmZombie;
+
+  const PRESETS = {
+    singlebox: {
+      schema_version: 1,
+      cluster: { name: "zombie-singlebox", nodes: [
+        { id: "node-a", host: "127.0.0.1", gpus: [
+          { index: 0, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 },
+          { index: 1, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 },
+          { index: 2, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 },
+          { index: 3, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 } ] } ] },
+      model: { name: "llama-3-70b", dtype: "q4", kv_cache: "fp16" },
+      policy: { target_tps: 18, max_latency_ms: 250, prefer_bandwidth: true, allow_cpu_offload: false, reserve_gb_per_gpu: 4.0 }
+    },
+    twonode: {
+      schema_version: 1,
+      cluster: { name: "zombie-2nodes", nodes: [
+        { id: "node-a", host: "192.168.1.10", gpus: [
+          { index: 0, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 },
+          { index: 1, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 } ],
+          links: [ { type: "ethernet", to: "node-b", gbps: 10 } ] },
+        { id: "node-b", host: "192.168.1.11", gpus: [
+          { index: 0, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 },
+          { index: 1, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 } ],
+          links: [ { type: "ethernet", to: "node-a", gbps: 10 } ] } ] },
+      model: { name: "llama-3-70b", dtype: "q4", kv_cache: "fp16" },
+      policy: { target_tps: 18, max_latency_ms: 250, prefer_bandwidth: true, allow_cpu_offload: false, reserve_gb_per_gpu: 4.0 }
+    },
+    mixed: {
+      schema_version: 1,
+      cluster: { name: "zombie-mixed-salvage", nodes: [
+        { id: "gamer-pc", host: "192.168.1.20", gpus: [
+          { index: 0, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 },
+          { index: 1, name: "RTX_3060", vram_gb: 12, mem_bw_gbps: 360 } ],
+          links: [ { type: "ethernet", to: "ex-server", gbps: 10 } ] },
+        { id: "ex-server", host: "192.168.1.21", gpus: [
+          { index: 0, name: "Tesla_P40", vram_gb: 24, mem_bw_gbps: 347 },
+          { index: 1, name: "Tesla_P40", vram_gb: 24, mem_bw_gbps: 347 } ],
+          links: [ { type: "ethernet", to: "gamer-pc", gbps: 10 } ] } ] },
+      model: { name: "llama-3-70b", dtype: "q4", kv_cache: "fp16" },
+      policy: { target_tps: 18, max_latency_ms: 250, prefer_bandwidth: true, allow_cpu_offload: false, reserve_gb_per_gpu: 4.0 }
+    }
+  };
+
+  const els = {
+    manifest: document.getElementById("manifest"),
+    stats: document.getElementById("stats"),
+    banner: document.getElementById("banner"),
+    stages: document.getElementById("stages"),
+    planjson: document.getElementById("planjson"),
+  };
+  let losses = new Set();
+
+  function fmt(x) { return Number(x.toFixed(1)).toString(); }
+
+  function stat(v, k) {
+    return `<div class="stat"><div class="v">${v}</div><div class="k">${k}</div></div>`;
+  }
+
+  function gpuCard(g, dead) {
+    const spec = `${g.node}:${g.gpu}`;
+    return `<button class="gpu${dead ? " dead" : ""}" data-spec="${spec}"
+      aria-pressed="${dead}" title="${dead ? "Revive" : "Kill"} ${g.name} on ${g.node}">
+      <span class="id">${g.node}:gpu:${g.gpu}</span> <span class="dead-tag">✕ DEAD</span><br>
+      <span class="meta">${g.name} · ${g.vram_gb} GB${g.mem_bw_gbps ? " · " + g.mem_bw_gbps + " GB/s" : ""}</span>
+    </button>`;
+  }
+
+  function render() {
+    let original, degraded, plan, error = null;
+    try {
+      original = normalizeManifest(JSON.parse(els.manifest.value));
+    } catch (e) {
+      els.banner.textContent = "Manifest error: " + e.message;
+      els.banner.classList.remove("hidden");
+      els.stages.innerHTML = ""; els.stats.innerHTML = ""; els.planjson.textContent = "";
+      return;
+    }
+    const allGpus = [];
+    for (const n of original.cluster.nodes) for (const g of n.gpus) {
+      allGpus.push({ node: n.id, gpu: Math.trunc(g.index), name: g.name || "GPU",
+        vram_gb: Number(g.vram_gb), mem_bw_gbps: g.mem_bw_gbps });
+    }
+    losses = new Set([...losses].filter(s => allGpus.some(g => `${g.node}:${g.gpu}` === s)));
+
+    try {
+      degraded = degradeManifest(original, [...losses]);
+      plan = buildPlan(degraded);
+    } catch (e) { error = e.message; }
+
+    const live = allGpus.filter(g => !losses.has(`${g.node}:${g.gpu}`));
+    const totalVram = live.reduce((s, g) => s + g.vram_gb, 0);
+    const reserve = Number(original.policy.reserve_gb_per_gpu) * live.length;
+
+    let statsHtml = "";
+    if (plan) {
+      statsHtml += stat(fmt(plan.model.estimated_model_gb), "model est. GB");
+      statsHtml += stat(fmt(Math.max(0, totalVram - reserve)), "usable VRAM GB");
+      statsHtml += stat(plan.pipeline_stages.length, "stages");
+    } else {
+      statsHtml += stat(fmt(Math.max(0, totalVram - reserve)), "usable VRAM GB");
+    }
+    statsHtml += stat(`${live.length}/${allGpus.length}`, "GPUs alive");
+    els.stats.innerHTML = statsHtml;
+
+    if (error) {
+      els.banner.textContent = error + "  (Revive a GPU, shrink the model, or lower reserve_gb_per_gpu.)";
+      els.banner.classList.remove("hidden");
+    } else {
+      els.banner.classList.add("hidden");
+    }
+
+    const cardFor = Object.fromEntries(allGpus.map(g => [`${g.node}:${g.gpu}`, g]));
+    let html = "";
+    if (plan) {
+      plan.pipeline_stages.forEach((st, i) => {
+        if (i > 0) {
+          const prev = plan.pipeline_stages[i - 1].placement[0].node;
+          const cur = st.placement[0].node;
+          const bw = linkBwBetween(degraded, prev, cur);
+          html += `<div class="boundary">▼ ${prev === cur ? "same node (PCIe)"
+            : bw > 0 ? bw + " Gbit/s link" : '<span class="warn">⚠ no link defined</span>'}</div>`;
+        }
+        const nodes = [...new Set(st.placement.map(p => p.node))].join(", ");
+        html += `<div class="stage"><div class="stage-h">stage ${st.stage} · ${nodes}</div><div class="cards">`
+          + st.placement.map(p => gpuCard(cardFor[`${p.node}:${p.gpu}`], false)).join("")
+          + "</div></div>";
+      });
+    }
+    const dead = allGpus.filter(g => losses.has(`${g.node}:${g.gpu}`));
+    if (dead.length || !plan) {
+      const label = plan ? "removed from plan" : "cluster (no feasible plan)";
+      const cards = plan ? dead : allGpus;
+      html += `<div class="stage"><div class="stage-h">${label}</div><div class="cards">`
+        + cards.map(g => gpuCard(g, losses.has(`${g.node}:${g.gpu}`))).join("")
+        + "</div></div>";
+    }
+    els.stages.innerHTML = html;
+    els.planjson.textContent = plan ? JSON.stringify(plan, null, 2) : "";
+
+    for (const btn of els.stages.querySelectorAll(".gpu")) {
+      btn.addEventListener("click", () => {
+        const spec = btn.dataset.spec;
+        if (losses.has(spec)) losses.delete(spec); else losses.add(spec);
+        render();
+      });
+    }
+  }
+
+  function loadPreset(name) {
+    els.manifest.value = JSON.stringify(PRESETS[name], null, 2);
+    losses = new Set();
+    for (const b of document.querySelectorAll(".preset")) {
+      b.setAttribute("aria-pressed", String(b.dataset.preset === name));
+    }
+    render();
+  }
+
+  for (const b of document.querySelectorAll(".preset")) {
+    b.addEventListener("click", () => loadPreset(b.dataset.preset));
+  }
+  document.getElementById("apply").addEventListener("click", render);
+  document.getElementById("revive").addEventListener("click", () => { losses = new Set(); render(); });
+
+  loadPreset("singlebox");
+})();
+</script>
+</body>
+</html>

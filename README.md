@@ -2,6 +2,11 @@
 
 A lightweight control plane for Zombie Compute style consumer GPU clusters.
 
+**Site & live demo:** https://bigbirdreturns.github.io/axm-zombie-adapter/ — the
+planner ported to JavaScript, running entirely in your browser: edit a cluster
+manifest, click GPUs to kill them, watch the plan reroute. (Deployed
+automatically from `docs/` by the `pages` workflow on every push to main.)
+
 This project is an independent adapter. It is not affiliated with Navigator's Log and it does not reproduce any paid dossier content. It implements the integration surface discussed publicly: pipeline parallel inference across multiple GPUs with bandwidth-first planning.
 
 ## What it does
