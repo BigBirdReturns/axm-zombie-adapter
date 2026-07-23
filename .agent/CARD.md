@@ -1,7 +1,7 @@
 <!-- tier-orientation-card v1 — generated; safe to regenerate -->
 # axm-zombie-adapter
 
-Canonical checkout: `D:\Projects\Organs\AXM\axm-zombie-adapter\main`
+Canonical checkout: `D:\Projects\Tooling\axm-zombie-adapter\main`
 
 ## Purpose
 A lightweight control plane for Zombie Compute style consumer GPU clusters.
