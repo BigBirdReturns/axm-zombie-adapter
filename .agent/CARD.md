@@ -20,8 +20,8 @@ A lightweight control plane for Zombie Compute style consumer GPU clusters.
 - Bounded validator-backed work follows root `AGENTS.md`; no web dashboard is required.
 
 ## Staleness
-- generated_at: 2026-07-23
-- source_commit: 52773da
+- generated_at: 2026-07-26
+- source_commit: 76b12eb
 - regenerate: `python D:/Projects/Tooling/Estate/main/cards.py axm-zombie-adapter --write`
 
 This card is GENERATED. If it disagrees with the repository, the repository is right. Do not hand-edit this card — regenerate it: python D:/Projects/Tooling/Estate/main/cards.py axm-zombie-adapter --write
