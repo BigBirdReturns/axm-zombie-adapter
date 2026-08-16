@@ -72,6 +72,75 @@ class GuessesAreRefused(unittest.TestCase):
         self.assertIn("mixture-of-experts", str(caught.exception))
 
 
+class SizeProvenanceIsDisclosed(unittest.TestCase):
+    """A plan must say how the size that authorized its placement was obtained.
+
+    Without this, a plan sized by a name guess is indistinguishable from one
+    sized by a measured checkpoint, and silently acquires its evidence status.
+    """
+
+    def test_declared_bytes_are_reported_as_manifest_bytes(self):
+        plan = build_plan(manifest(
+            {"name": "anything-at-all", "dtype": "fp16", "bytes": 8 * 1024**3}))
+        self.assertEqual(plan["model"]["model_size_source"], "manifest_bytes")
+        self.assertEqual(plan["model"]["model_size_bytes"], 8 * 1024**3)
+
+    def test_declared_params_are_reported_as_params_and_quantization(self):
+        plan = build_plan(manifest(
+            {"name": "anything-at-all", "dtype": "fp8", "params": 30_000_000_000}))
+        self.assertEqual(
+            plan["model"]["model_size_source"], "manifest_params_and_quantization")
+
+    def test_name_inference_is_reported_as_a_legacy_heuristic(self):
+        # The validated golden model. Its size is a guess and the plan says so.
+        plan = build_plan(manifest({"name": "llama-3-70b", "dtype": "q4"}))
+        self.assertEqual(plan["model"]["model_size_source"], "legacy_name_heuristic")
+
+    def test_object_identity_is_null_unless_declared(self):
+        plan = build_plan(manifest(
+            {"name": "anything-at-all", "dtype": "fp16", "bytes": 8 * 1024**3}))
+        self.assertIsNone(plan["model"]["model_object_sha256"])
+
+    def test_declared_object_identity_is_carried_into_the_plan(self):
+        digest = "a" * 64
+        plan = build_plan(manifest({"name": "anything-at-all", "dtype": "fp16",
+                                    "bytes": 8 * 1024**3, "sha256": digest}))
+        self.assertEqual(plan["model"]["model_object_sha256"], digest)
+
+    def test_refusal_names_the_size_source(self):
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "Kimi-K3", "dtype": "fp8",
+                                 "bytes": 1_560_860_324_864}))
+        self.assertIn("manifest_bytes", str(caught.exception))
+
+
+class ContradictorySizeClaimsFailClosed(unittest.TestCase):
+    """A stale `bytes` beside honest `params` is the same defect, other channel.
+
+    Preferring `bytes` by precedence would place a terabyte-scale object using a
+    32 GB claim -- a confident plan, and wrong.
+    """
+
+    def test_order_of_magnitude_disagreement_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "some-model", "dtype": "fp8",
+                                 "bytes": 32 * 1024**3,
+                                 "params": 1_000_000_000_000}))
+        message = str(caught.exception)
+        self.assertIn("Size-claim conflict", message)
+        self.assertIn("model.bytes", message)
+        self.assertIn("model.params", message)
+
+    def test_quantization_scale_disagreement_is_tolerated(self):
+        # 7B declared at fp16 (14 GB) beside a 13 GB byte count: packaging
+        # noise, not a contradiction. `bytes` still wins.
+        plan = build_plan(manifest({"name": "some-model", "dtype": "fp16",
+                                    "bytes": 13 * 1024**3,
+                                    "params": 7_000_000_000}))
+        self.assertEqual(plan["model"]["estimated_model_gb"], 13.0)
+        self.assertEqual(plan["model"]["model_size_source"], "manifest_bytes")
+
+
 class RealKimiK3DoesNotFitFourThreeNineties(unittest.TestCase):
     """The measured object, against the measured hardware.
 
