@@ -1,7 +1,25 @@
 from __future__ import annotations
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import math
 import re
+
+from .placement import (
+    BYTES_PER_GB,
+    PREDICATE_OBJECT_EVIDENCE,
+    PREDICATE_RESIDENCE,
+    PREDICATE_RUNTIME,
+    PREDICATE_WEIGHT_ACCOUNTING,
+    REFUSAL_WEIGHT_ACCOUNTING_MISSING,
+    STATE_REPRESENTABLE_NOT_RUNNABLE,
+    STATE_RUNNABLE,
+    WEIGHT_FIELDS,
+    PlacementRefusal,
+    build_seats,
+    measured_engines_for_node,
+    prove_placement,
+    reconcile_weight_accounting,
+    resolve_verified_identity,
+)
 
 # Distinguishes "the manifest did not declare this field" from "the manifest
 # declared it as null". `None` cannot carry that distinction, and the two mean
@@ -60,7 +78,7 @@ MAX_EXACT_INTEGER = 2**53 - 1
 # One gibibyte. `estimated_model_gb` is derived from this by exact integer
 # arithmetic (see _estimated_gb) rather than by float rounding, because the two
 # writers' native round() disagree at a decimal tie.
-_GIB = 1024**3
+_GIB = BYTES_PER_GB
 
 # How the size that authorized a placement was obtained. A plan carries this so
 # a declared measurement and a name guess are never read as the same evidence.
@@ -104,8 +122,13 @@ def _validated_size_field(value: Any, field: str, name: str) -> int:
     A zero or negative size satisfies every feasibility comparison, so it
     authorizes any placement at all. That is the same false-authorization the
     name heuristic used to produce, reached through a declared field instead.
+
+    This is the single normalizer for every declared byte count in the
+    manifest, including WL-02's three weight-accounting quantities. Placement
+    consumes what this returns; it does not re-parse the same fields with a
+    second set of rules.
     """
-    unit = "bytes" if field == "bytes" else "parameters"
+    unit = "bytes" if field.endswith("bytes") else "parameters"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(
             f"model.{field} for {name!r} must be a positive whole number of "
@@ -241,19 +264,109 @@ def _resolve_model_size(model: Dict[str, Any]) -> tuple[int, str]:
         "in the manifest."
     )
 
-def _cluster_gpus(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
-    gpus: List[Dict[str, Any]] = []
-    for node in manifest["cluster"]["nodes"]:
-        for gpu in node["gpus"]:
-            gpus.append({
-                "node": node["id"],
-                "host": node.get("host"),
-                "gpu": int(gpu["index"]),
-                "name": gpu.get("name", "GPU"),
-                "vram_gb": float(gpu["vram_gb"]),
-                "mem_bw_gbps": gpu.get("mem_bw_gbps"),
-            })
-    return gpus
+
+# --------------------------------------------------------------------------
+# WL-02 intake: weight accounting and the runnable/representable question
+# --------------------------------------------------------------------------
+
+# A size authority that disagrees with the weight accounting is the same defect
+# class as `bytes` disagreeing with `params`: two numbers, one object, no
+# principled way to choose. Named here rather than in placement.py because the
+# contradiction is between the two layers, not inside either one.
+REFUSAL_WEIGHT_ACCOUNTING_CONFLICT = "WEIGHT_ACCOUNTING_CONFLICT"
+
+
+def _resolve_weight_accounting(
+    model: Dict[str, Any], model_bytes: int
+) -> Optional[Dict[str, int]]:
+    """The three weight quantities, normalized and reconciled, or None.
+
+    Normalization is the model-size authority's job and is done here with the
+    same `_validated_size_field` every other declared byte count goes through.
+    Reconciliation - whether the three describe one object - belongs to
+    placement, which owns what the quantities *mean*.
+
+    Returns None when `model.weights` is absent, which is a complete answer:
+    the manifest simply did not declare the accounting, and the caller decides
+    whether that makes the plan not-runnable or a refusal.
+    """
+    name = str(model.get("name", ""))
+    if "weights" not in model:
+        return None
+    declared = model["weights"]
+    if not isinstance(declared, dict):
+        raise PlacementRefusal(
+            REFUSAL_WEIGHT_ACCOUNTING_MISSING,
+            f"model.weights for {name!r} must be an object declaring "
+            f"{', '.join(WEIGHT_FIELDS)}, got {declared!r}.",
+            model=name,
+        )
+    missing = [field for field in WEIGHT_FIELDS if field not in declared]
+    if missing:
+        raise PlacementRefusal(
+            REFUSAL_WEIGHT_ACCOUNTING_MISSING,
+            f"model.weights for {name!r} is missing {', '.join(missing)}. All "
+            "three quantities are required together: the checkpoint set is "
+            "what custody binds, the tensor payload is what occupies device "
+            "memory, and the container overhead is the difference. Declaring "
+            "some of them leaves the others to be inferred, which is how one "
+            "number ends up standing for two different facts.",
+            model=name, missing=missing,
+        )
+    fields = {
+        field: _validated_size_field(declared[field], f"weights.{field}", name)
+        for field in WEIGHT_FIELDS
+    }
+    accounting = reconcile_weight_accounting(fields, name)
+
+    if accounting["tensor_payload_bytes"] != model_bytes:
+        raise PlacementRefusal(
+            REFUSAL_WEIGHT_ACCOUNTING_CONFLICT,
+            f"model.bytes for {name!r} resolves to {model_bytes} B but "
+            f"model.weights.tensor_payload_bytes is "
+            f"{accounting['tensor_payload_bytes']} B. model.bytes is the size "
+            "that authorizes the placement, so it must be the quantity that "
+            "occupies device memory - the tensor payload, not the checkpoint "
+            "set and not a third number.",
+            model=name, model_size_bytes=model_bytes,
+            tensor_payload_bytes=accounting["tensor_payload_bytes"],
+        )
+    return accounting
+
+
+def _placement_is_attempted(model: Dict[str, Any]) -> bool:
+    """Whether this manifest is asking for a placement to be proved.
+
+    Object-level evidence is the trigger: an identity binding, residence
+    records, or weight accounting. Topology alone is not - a manifest that
+    describes hardware and a model name is describing a cluster, not asserting
+    that a specific measured object can run on it, and refusing it would break
+    every manifest written before this evidence existed for no safety gain.
+
+    What is *not* on this list matters as much as what is. Seat UUIDs and node
+    runtimes are hardware description; they do not by themselves claim that any
+    object is placeable.
+    """
+    return any(key in model for key in ("identity", "residence", "weights"))
+
+
+def _missing_placement_predicates(manifest: Dict[str, Any]) -> List[str]:
+    """Which placement predicates this manifest never claimed at all."""
+    model = manifest["model"]
+    missing: List[str] = []
+    if "identity" not in model:
+        missing.append(PREDICATE_OBJECT_EVIDENCE)
+    if "weights" not in model:
+        missing.append(PREDICATE_WEIGHT_ACCOUNTING)
+    if not (model.get("residence") or []):
+        missing.append(PREDICATE_RESIDENCE)
+    if not any(
+        measured_engines_for_node(node)
+        for node in manifest["cluster"]["nodes"]
+    ):
+        missing.append(PREDICATE_RUNTIME)
+    return missing
+
 
 def _link_bw_between(manifest: Dict[str, Any], a: str, b: str) -> float:
     if a == b:
@@ -284,20 +397,36 @@ def _score_stage_boundary(manifest: Dict[str, Any], left_nodes: List[str], right
 def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
     model = manifest["model"]
     policy = manifest["policy"]
-    gpus = _cluster_gpus(manifest)
 
-    total_vram = sum(g["vram_gb"] for g in gpus)
+    # Seats, not boards. This refuses a manifest that seats one accelerator
+    # twice before anything is sized, because such a manifest is wrong about
+    # the hardware whether or not a placement is being attempted.
+    gpus = build_seats(manifest)
+
     model_bytes, size_source = _resolve_model_size(model)
     model_sha256 = _validated_sha256(model.get("sha256"), model["name"])
+    weights = _resolve_weight_accounting(model, model_bytes)
     model_gb = model_bytes / _GIB
 
     reserve_gb_per_gpu = float(policy.get("reserve_gb_per_gpu", 4.0))
-    usable_vram = max(0.0, total_vram - reserve_gb_per_gpu * len(gpus))
-    if usable_vram < model_gb * 1.05:
-        raise ValueError(
-            f"Insufficient VRAM for rough model estimate. Usable ~{usable_vram:.1f} GB, "
-            f"model ~{model_gb:.1f} GB (size {model_bytes} B from {size_source})."
-        )
+    attempted = _placement_is_attempted(model)
+
+    if not attempted:
+        # The aggregate screen, and the exact limits of what it can do. It is a
+        # *necessary* condition: a model larger than every device put together
+        # certainly does not fit. It is never a sufficient one, because
+        # independent devices do not share an address space - which is why it
+        # can only refuse here, and why a plan that survives it is classified
+        # representable rather than runnable. When placement evidence *is*
+        # supplied this screen is skipped entirely: the proof below decides,
+        # and it names the precise reason instead of an arithmetic result.
+        total_vram = sum(g["vram_gb"] for g in gpus)
+        usable_vram = max(0.0, total_vram - reserve_gb_per_gpu * len(gpus))
+        if usable_vram < model_gb * 1.05:
+            raise ValueError(
+                f"Insufficient VRAM for rough model estimate. Usable ~{usable_vram:.1f} GB, "
+                f"model ~{model_gb:.1f} GB (size {model_bytes} B from {size_source})."
+            )
 
     node_ids = sorted(list({g["node"] for g in gpus}))
     multi_node = len(node_ids) > 1
@@ -329,6 +458,39 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
             )
         )
 
+    if attempted:
+        if weights is None:
+            raise PlacementRefusal(
+                REFUSAL_WEIGHT_ACCOUNTING_MISSING,
+                f"Placement of {model['name']!r} was requested but "
+                "model.weights is absent. Device memory holds the tensor "
+                "payload while custody binds the complete checkpoint set; "
+                "without both declared there is no unambiguous number to "
+                "place, and renaming either one 'model bytes' is how the "
+                "ambiguity gets rebuilt one layer down.",
+                model=str(model["name"]),
+            )
+        identity = resolve_verified_identity(model)
+        placement = {
+            "state": STATE_RUNNABLE,
+            "missing_predicates": [],
+            "proof": prove_placement(
+                manifest, stages, weights, identity, reserve_gb_per_gpu
+            ),
+        }
+    else:
+        # Representable, not runnable. The topology is describable and the plan
+        # is a useful sketch of it, but nothing here establishes that a
+        # specific measured object can be loaded and executed on these
+        # devices. Saying so in a field is the whole point: the old head's
+        # failure was not that it computed the wrong number, it was that a
+        # sketch and a proof came out looking the same.
+        placement = {
+            "state": STATE_REPRESENTABLE_NOT_RUNNABLE,
+            "missing_predicates": _missing_placement_predicates(manifest),
+            "proof": None,
+        }
+
     return {
         "schema_version": 1,
         "model": {
@@ -350,6 +512,7 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
             {"stage": i, "placement": [{"node": g["node"], "gpu": g["gpu"]} for g in stage]}
             for i, stage in enumerate(stages)
         ],
+        "placement": placement,
         "kv_cache_policy": {
             "reserve_gb_per_gpu": reserve_gb_per_gpu,
             "spill_allowed": bool(policy.get("allow_cpu_offload", False)),

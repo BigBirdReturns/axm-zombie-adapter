@@ -17,6 +17,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Resurrection test (stdlib only, no install)
         run: python tests/golden_check.py
+      - name: WL-02 placement witnesses (stdlib only, no install)
+        # Runs before any install, on purpose: the placement boundary must be
+        # provable from a bare checkout, on a host with no pytest.
+        run: python -B tests/test_placement.py
       - name: Full suite without yaml extra
         run: |
           pip install -e . pytest

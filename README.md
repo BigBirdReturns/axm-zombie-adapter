@@ -105,9 +105,64 @@ This is the resurrection test: no network, no third-party dependencies. It
 builds a plan from the JSON example, checks it is byte-identical to the
 committed golden file, and runs every exporter.
 
+## What authorizes a placement
+
+A plan is a claim that a model fits particular hardware, so it has to carry the
+evidence rather than the assertion. Every plan says which of two things it is:
+
+- `RUNNABLE` — the evidence is present and the placement is proved, device by
+  device.
+- `REPRESENTABLE_NOT_RUNNABLE` — the topology is real and worth drawing, but
+  nothing in it establishes that a measured object can be loaded and executed
+  there. The plan lists exactly which predicates were never claimed.
+
+Contradicted evidence is neither of those. It is a typed refusal.
+
+- **A declared digest is not custody.** `model.sha256` says a digest was
+  written down. `model.identity` says someone verified one, under a named
+  scheme, from a named source, at a named time. Only `identity_state:
+  VERIFIED` authorizes a placement; anything less is
+  `UNVERIFIED_MODEL_IDENTITY`.
+- **Exact size, or no plan.** The planner does not infer a placement size from
+  the model name, because a wrong guess is not surfaced as an error — it is
+  surfaced as a confident plan that OOMs on contact with hardware.
+- **Three byte quantities, three meanings.** `checkpoint_set_bytes` is what
+  custody binds; `tensor_payload_bytes` is what occupies device memory and is
+  what gets placed; `container_overhead_bytes` is the difference. For Kimi-K3
+  that difference is 75,766,584 bytes of safetensors headers. Collapsing them
+  into one "model bytes" field is how one number ends up standing for two facts.
+- **Seats are not boards.** A GPU entry describes a *seat*; `uuid` identifies
+  the *physical accelerator* in it. Two seats claiming one board are refused,
+  because their memory is not independent and summing it invents VRAM.
+- **Declared is not measured, and resident is not still-resident.** A runtime
+  supports a placement only at `compatibility: MEASURED`; residence counts only
+  while its `freshness` is `CURRENT`.
+- **Independent VRAM is never pooled.** Every weight byte is assigned to a named
+  device, and each stage is proved against its own devices. Memory on a node
+  that lacks the weights or lacks an engine is not capacity, whatever the
+  cluster total says. The arithmetic ships inside the plan as
+  `placement.proof`.
+- **Refusals are artifacts.** When a placement cannot be proved, the CLI writes
+  a typed refusal where the plan would have gone and exits `2`:
+
+```bash
+axm-zombie plan examples/estate_octo_w01_kimi_k3.json --out refusal.json
+# REFUSED [UNVERIFIED_MODEL_IDENTITY] ...
+```
+
+`artifacts/estate-octo-w01-kimi-k3.refusal.json` is a committed refusal for a
+real two-accelerator workstation asked to hold a 1453.7 GiB model. It carries
+no digest, and that is deliberate: an accepted identity for that object exists
+in a private evidence packet, the manifest points at it by name, and the
+planner refuses rather than placing an object this repository cannot name. A
+syntactically valid invented digest would be worse than none, because a reader
+could not tell it from real custody.
+
 ## Model and cluster notes
 
-- The planner is heuristic on purpose. It stays conservative and it favors bandwidth locality.
+- The planner is heuristic in how it *shapes* stages. It is not heuristic about
+  whether they fit.
+- The planner stays conservative and it favors bandwidth locality.
 - For multi-node rigs, stage boundaries across nodes are expensive unless you have real interconnect (10GbE or better).
 - KV cache headroom matters. The planner reserves a fixed default per GPU, and you should tune it per model and batch.
 

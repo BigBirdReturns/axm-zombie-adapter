@@ -33,7 +33,34 @@ const MARKERS = [
 
 const cases = JSON.parse(fs.readFileSync(path.join(__dirname, "conformance_cases.json"), "utf-8"));
 
-function manifestFor(model) {
+// Named clusters, mirroring test_writer_conformance.py. The default is
+// deliberately bare -- no board identities, no runtimes -- because that is
+// what a manifest written before placement evidence existed looks like.
+const DUPLICATE_BOARD = "GPU-493239dc-f76e-bbbb-8e68-ffd34a5e7bbc";
+const DISTINCT = [0, 1, 2, 3].map((i) => `GPU-aaaa1111-0000-4000-8000-00000000000${i}`);
+const MEASURED = [{ engine: "llamacpp", compatibility: "MEASURED" }];
+
+function gpus(uuids) {
+  return [0, 1, 2, 3].map((i) => {
+    const gpu = { index: i, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 };
+    if (uuids) gpu.uuid = uuids[i];
+    return gpu;
+  });
+}
+
+const CLUSTERS = {
+  "": { gpus: gpus(null), runtimes: [] },
+  "evidenced": { gpus: gpus(DISTINCT), runtimes: MEASURED },
+  "duplicate-board": {
+    gpus: gpus(DISTINCT.slice(0, 2).concat([DUPLICATE_BOARD, DUPLICATE_BOARD])),
+    runtimes: MEASURED,
+  },
+  "no-runtime": { gpus: gpus(DISTINCT), runtimes: [] },
+  "unmeasured-runtime": { gpus: gpus(DISTINCT), runtimes: ["llamacpp"] },
+};
+
+function manifestFor(model, cluster) {
+  const shape = CLUSTERS[cluster === undefined ? "" : cluster];
   return {
     schema_version: 1,
     cluster: {
@@ -41,7 +68,8 @@ function manifestFor(model) {
       nodes: [{
         id: "node-a",
         host: "127.0.0.1",
-        gpus: [0, 1, 2, 3].map((i) => ({ index: i, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936 })),
+        runtimes: JSON.parse(JSON.stringify(shape.runtimes)),
+        gpus: JSON.parse(JSON.stringify(shape.gpus)),
       }],
     },
     model: Object.assign({}, model),
@@ -55,13 +83,21 @@ function manifestFor(model) {
 const out = {};
 for (const c of cases) {
   try {
-    const plan = planner.buildPlan(planner.normalizeManifest(manifestFor(c.model)));
-    // The complete model object, not a projection of it. A selected view left
-    // model_size_bytes -- the number the placement was authorized against --
-    // outside the comparison entirely.
-    out[c.id] = { kind: "plan", model: plan.model };
+    const plan = planner.buildPlan(planner.normalizeManifest(manifestFor(c.model, c.cluster)));
+    // The complete model object and the complete placement decision, not a
+    // projection of either. A selected view left model_size_bytes -- the
+    // number the placement was authorized against -- outside the comparison
+    // entirely.
+    out[c.id] = { kind: "plan", model: plan.model, placement: plan.placement };
   } catch (e) {
-    out[c.id] = { kind: "refuse", markers: MARKERS.filter((m) => e.message.includes(m)).sort() };
+    out[c.id] = {
+      kind: "refuse",
+      // The typed code is the machine-readable contract and is what a
+      // downstream reader branches on; the marker set stays as the secondary
+      // check for the untyped size-authority refusals, which have no code.
+      code: e.code === undefined ? null : e.code,
+      markers: MARKERS.filter((m) => e.message.includes(m)).sort(),
+    };
   }
 }
 

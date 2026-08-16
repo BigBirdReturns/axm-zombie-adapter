@@ -52,6 +52,17 @@ check("docs/planner.js initializes and exports its API", () => {
 check("the removed estimateModelBytes export is really gone", () => {
   assert.strictEqual(planner.estimateModelBytes, undefined);
 });
+check("the published page consumes the placement classification", () => {
+  // docs/index.html is the surface a reader actually sees. If it stops reading
+  // placement.state, the page can draw a topology that looks exactly like a
+  // proved placement -- which is the original WL-02 defect wearing a UI.
+  const page = fs.readFileSync(path.join(REPO, "docs", "index.html"), "utf-8");
+  assert.ok(page.includes("placement.state"), "the page ignores placement.state");
+  assert.ok(
+    page.includes("missing_predicates"),
+    "the page does not show which predicates were never claimed"
+  );
+});
 
 function planFor(manifestFile) {
   return planner.buildPlan(planner.normalizeManifest(readJson(manifestFile)));
@@ -70,8 +81,16 @@ for (const [example, golden] of [
   });
 }
 
-check("the golden plan discloses its size came from a name guess", () => {
+check("the golden plan discloses that its size was declared, not guessed", () => {
   const plan = planFor(path.join(EXAMPLES, "cluster_4x3090_singlebox.json"));
+  assert.strictEqual(plan.model.model_size_source, "manifest_bytes");
+  assert.strictEqual(
+    plan.model.model_object_sha256,
+    "b55515f6bff0e4efbca1fe74c68bf4ec5762f70e787d544586b702a6843caf71"
+  );
+});
+check("a name-guessed size is still disclosed as one", () => {
+  const plan = planner.buildPlan(planner.normalizeManifest(manifest({ name: "llama-3-70b", dtype: "q4" })));
   assert.strictEqual(plan.model.model_size_source, "legacy_name_heuristic");
   assert.strictEqual(plan.model.model_object_sha256, null);
 });
@@ -245,6 +264,301 @@ refuses("model-107b is not read as a 7B model", { name: "model-107b", dtype: "q4
 check("llama-3-70b still resolves to 32.6 GB", () => {
   const plan = planner.buildPlan(planner.normalizeManifest(manifest({ name: "llama-3-70b", dtype: "q4" })));
   assert.strictEqual(plan.model.estimated_model_gb, 32.6);
+});
+
+/* ------------------------------------------------------------------------
+ * WL-02: the published writer must reach the same placement decision.
+ *
+ * These mirror tests/test_placement.py. `crypto` is a Node built-in, so this
+ * stays dependency-free per DURABILITY.md invariant 4; no digest below is
+ * invented, each is the sha-256 of an ASCII label computed here, under the
+ * same scheme and the same labels the Python witnesses use.
+ * --------------------------------------------------------------------- */
+const crypto = require("crypto");
+
+function labelDigest(label) {
+  return crypto.createHash("sha256").update(label, "ascii").digest("hex");
+}
+
+const W_DIGEST = labelDigest("witness-model-object:llama-3-70b-q4");
+const W_OTHER = labelDigest("witness-model-object:a-different-object");
+
+function wIdentity(digest, state) {
+  return {
+    identity_scheme: "test/ascii-label-object@1",
+    identity_digest: digest === undefined ? W_DIGEST : digest,
+    identity_source: "tests/browser_parity.js::labelDigest",
+    identity_state: state === undefined ? "VERIFIED" : state,
+    verified_at: "2026-08-16T00:00:00Z",
+    validator: "crypto.createHash('sha256') over the ASCII label",
+  };
+}
+
+function wWeights(payload) {
+  const p = payload === undefined ? 35000000000 : payload;
+  return {
+    checkpoint_set_bytes: p + 8388608,
+    tensor_payload_bytes: p,
+    container_overhead_bytes: 8388608,
+  };
+}
+
+function wModel(overrides) {
+  return Object.assign({
+    name: "llama-3-70b",
+    dtype: "q4",
+    kv_cache: "fp16",
+    bytes: 35000000000,
+    sha256: W_DIGEST,
+    weights: wWeights(),
+    identity: wIdentity(),
+    engines: ["llamacpp"],
+    residence: [{
+      node: "node-a", verified: true, freshness: "CURRENT",
+      identity_digest: W_DIGEST,
+    }],
+  }, overrides || {});
+}
+
+function wManifest(model, gpus, runtimes) {
+  return {
+    schema_version: 1,
+    cluster: {
+      name: "witness",
+      nodes: [{
+        id: "node-a",
+        host: "10.0.0.1",
+        runtimes: runtimes === undefined
+          ? [{ engine: "llamacpp", compatibility: "MEASURED" }]
+          : runtimes,
+        gpus: gpus === undefined
+          ? [0, 1, 2, 3].map((i) => ({
+              index: i, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936,
+              uuid: `GPU-aaaa1111-0000-4000-8000-00000000000${i}`,
+            }))
+          : gpus,
+      }],
+    },
+    model: model,
+    policy: { target_tps: 18, reserve_gb_per_gpu: 4.0 },
+  };
+}
+
+function wRefusal(model, gpus, runtimes) {
+  try {
+    planner.buildPlan(planner.normalizeManifest(wManifest(model, gpus, runtimes)));
+  } catch (e) {
+    return e;
+  }
+  return null;
+}
+
+function wRefuses(label, code, model, gpus, runtimes) {
+  check(label, () => {
+    const error = wRefusal(model, gpus, runtimes);
+    assert.ok(error !== null, "a plan was emitted instead of a refusal");
+    assert.strictEqual(
+      error.code, code,
+      `expected ${code}, got ${error.code || "(untyped)"}: ${error.message}`
+    );
+  });
+}
+
+console.log("placement: runnable is not representable");
+check("a manifest with no object evidence is representable, not runnable", () => {
+  const plan = planner.buildPlan(planner.normalizeManifest(
+    wManifest({ name: "llama-3-70b", dtype: "q4" }, undefined, [])
+  ));
+  assert.strictEqual(plan.placement.state, "REPRESENTABLE_NOT_RUNNABLE");
+  assert.strictEqual(plan.placement.proof, null);
+  assert.deepStrictEqual(plan.placement.missing_predicates, [
+    "verified_object_identity", "declared_weight_accounting",
+    "verified_residence", "measured_runtime",
+  ]);
+});
+check("this page cannot promote a sketch to runnable by looking at topology", () => {
+  // Topology only, but every seat identified and a measured runtime declared.
+  // Nothing here names an object, so nothing here can be runnable.
+  const plan = planner.buildPlan(planner.normalizeManifest(
+    wManifest({ name: "llama-3-70b", dtype: "q4" })
+  ));
+  assert.strictEqual(plan.placement.state, "REPRESENTABLE_NOT_RUNNABLE");
+  assert.deepStrictEqual(plan.placement.missing_predicates, [
+    "verified_object_identity", "declared_weight_accounting",
+    "verified_residence",
+  ]);
+});
+check("a fully evidenced manifest is runnable and carries its proof", () => {
+  const plan = planner.buildPlan(planner.normalizeManifest(wManifest(wModel())));
+  assert.strictEqual(plan.placement.state, "RUNNABLE");
+  assert.deepStrictEqual(plan.placement.missing_predicates, []);
+  assert.strictEqual(plan.placement.proof.identity.identity_digest, W_DIGEST);
+  assert.strictEqual(plan.placement.proof.sharding_strategy, "pipeline");
+});
+
+console.log("placement: typed refusals");
+wRefuses(
+  "one board seated twice refuses instead of summing its VRAM",
+  planner.REFUSAL.SEAT_IDENTITY_CONFLICT,
+  wModel(),
+  [0, 1].map((i) => ({
+    index: i, name: "RTX_3090", vram_gb: 24, mem_bw_gbps: 936,
+    uuid: "GPU-493239dc-f76e-bbbb-8e68-ffd34a5e7bbc",
+  }))
+);
+wRefuses(
+  "a bare sha256 is a declaration, not custody",
+  planner.REFUSAL.UNVERIFIED_MODEL_IDENTITY,
+  wModel({ identity: undefined })
+);
+wRefuses(
+  "an identity declared but not verified refuses",
+  planner.REFUSAL.UNVERIFIED_MODEL_IDENTITY,
+  wModel({ identity: wIdentity(W_DIGEST, "DECLARED") })
+);
+wRefuses(
+  "two identities for one object refuse",
+  planner.REFUSAL.UNVERIFIED_MODEL_IDENTITY,
+  wModel({ sha256: W_OTHER })
+);
+wRefuses(
+  "absent residence is not capacity",
+  planner.REFUSAL.RESIDENCE_UNVERIFIED,
+  wModel({ residence: [] })
+);
+wRefuses(
+  "stale residence is not current residence",
+  planner.REFUSAL.RESIDENCE_STALE,
+  wModel({ residence: [{ node: "node-a", verified: true, freshness: "STALE", identity_digest: W_DIGEST }] })
+);
+wRefuses(
+  "residence for a different object refuses rather than being ignored",
+  planner.REFUSAL.RESIDENCE_IDENTITY_MISMATCH,
+  wModel({ residence: [{ node: "node-a", verified: true, freshness: "CURRENT", identity_digest: W_OTHER }] })
+);
+wRefuses(
+  "a node with no runtime cannot execute, whatever its VRAM",
+  planner.REFUSAL.NO_SUPPORTED_ENGINE,
+  wModel(), undefined, []
+);
+wRefuses(
+  "no engine in common refuses even when runtimes exist",
+  planner.REFUSAL.NO_SUPPORTED_ENGINE,
+  wModel(), undefined, [{ engine: "vllm", compatibility: "MEASURED" }]
+);
+wRefuses(
+  "a declared but unmeasured runtime is not a runtime",
+  planner.REFUSAL.RUNTIME_UNMEASURED,
+  wModel(), undefined, ["llamacpp"]
+);
+wRefuses(
+  "an unsupported sharding strategy refuses rather than proving a different one",
+  planner.REFUSAL.UNSUPPORTED_SHARDING_STRATEGY,
+  wModel({ sharding_strategy: "tensor_parallel" })
+);
+wRefuses(
+  "weight accounting that does not close refuses",
+  planner.REFUSAL.WEIGHT_ACCOUNTING_INCONSISTENT,
+  wModel({ weights: { checkpoint_set_bytes: 35008388609, tensor_payload_bytes: 35000000000, container_overhead_bytes: 8388608 } })
+);
+wRefuses(
+  "a partial weight accounting refuses",
+  planner.REFUSAL.WEIGHT_ACCOUNTING_MISSING,
+  wModel({ weights: { tensor_payload_bytes: 35000000000, container_overhead_bytes: 8388608 } })
+);
+wRefuses(
+  "placement evidence without any weight accounting refuses",
+  planner.REFUSAL.WEIGHT_ACCOUNTING_MISSING,
+  wModel({ weights: undefined })
+);
+wRefuses(
+  "declaring the checkpoint set as model.bytes refuses",
+  planner.REFUSAL.WEIGHT_ACCOUNTING_CONFLICT,
+  wModel({ bytes: 35008388608 })
+);
+wRefuses(
+  "Kimi-K3's measured payload does not fit four 3090s",
+  planner.REFUSAL.STAGE_DOES_NOT_FIT,
+  wModel({ bytes: 1560860324864, weights: {
+    checkpoint_set_bytes: 1560936091448,
+    tensor_payload_bytes: 1560860324864,
+    container_overhead_bytes: 75766584,
+  } })
+);
+
+console.log("placement: every byte is assigned and proved");
+check("stage and device assignments are exact and within each device", () => {
+  const proof = planner.buildPlan(planner.normalizeManifest(wManifest(wModel()))).placement.proof;
+  const devices = proof.stages.reduce((all, s) => all.concat(s.devices), []);
+  assert.strictEqual(proof.assigned_bytes_total, proof.weights.tensor_payload_bytes);
+  assert.strictEqual(
+    devices.reduce((sum, d) => sum + d.assigned_bytes, 0),
+    proof.weights.tensor_payload_bytes
+  );
+  for (const stage of proof.stages) {
+    const own = stage.devices.reduce((sum, d) => sum + d.usable_bytes, 0);
+    assert.strictEqual(stage.usable_bytes, own);
+    assert.ok(stage.assigned_bytes <= own, "a stage exceeded its own seats");
+    assert.strictEqual(
+      stage.devices.reduce((sum, d) => sum + d.assigned_bytes, 0),
+      stage.assigned_bytes
+    );
+  }
+  for (const device of devices) {
+    assert.ok(
+      device.assigned_bytes <= device.usable_bytes,
+      `${device.node}:${device.gpu} was assigned more than it holds`
+    );
+  }
+});
+check("the proof keeps the three byte quantities apart", () => {
+  const proof = planner.buildPlan(planner.normalizeManifest(wManifest(wModel()))).placement.proof;
+  assert.strictEqual(proof.placed_bytes_are, "tensor_payload_bytes");
+  assert.strictEqual(proof.custody_binds, "checkpoint_set_bytes");
+  assert.ok(proof.weights.checkpoint_set_bytes > proof.weights.tensor_payload_bytes);
+  assert.strictEqual(
+    proof.weights.tensor_payload_bytes + proof.weights.container_overhead_bytes,
+    proof.weights.checkpoint_set_bytes
+  );
+});
+check("apportionment stays exact at terabyte scale", () => {
+  // total * weight here is ~3.4e22, far outside the exact integer range, so
+  // this is the case that fails silently if the arithmetic is not exact.
+  const parts = planner.apportionExact(1560860324864, [21474836480, 21474836480, 4294967296]);
+  assert.strictEqual(parts.reduce((a, b) => a + b, 0), 1560860324864);
+  assert.deepStrictEqual(
+    planner.apportionExact(1000000007, [5, 5, 3]),
+    planner.apportionExact(1000000007, [5, 5, 3])
+  );
+  assert.deepStrictEqual(planner.apportionExact(10, [0, 0]), [0, 0]);
+});
+check("a device smaller than the reserve contributes nothing", () => {
+  assert.strictEqual(planner.usableBytesForSeat({ vram_gb: 2.0 }, 4.0), 0);
+  assert.strictEqual(planner.usableBytesForSeat({ vram_gb: 24.0 }, 4.0), 20 * Math.pow(1024, 3));
+});
+
+console.log("placement: the real estate refusal");
+check("the committed OCTO-W01 refusal is what this writer emits too", () => {
+  const manifestPath = path.join(EXAMPLES, "estate_octo_w01_kimi_k3.json");
+  const committed = readJson(path.join(REPO, "artifacts", "estate-octo-w01-kimi-k3.refusal.json"));
+  let emitted = null;
+  try {
+    planner.buildPlan(planner.normalizeManifest(readJson(manifestPath)));
+  } catch (e) {
+    emitted = e.toObject ? e.toObject() : null;
+  }
+  assert.ok(emitted !== null, "the estate manifest did not refuse");
+  assert.deepStrictEqual(emitted, committed);
+});
+check("the real manifest carries no invented digest", () => {
+  const model = readJson(path.join(EXAMPLES, "estate_octo_w01_kimi_k3.json")).model;
+  assert.strictEqual(model.sha256, undefined);
+  assert.strictEqual(model.identity.identity_digest, "");
+  assert.ok(model.identity.identity_source.length > 0);
+  assert.strictEqual(
+    model.weights.tensor_payload_bytes + model.weights.container_overhead_bytes,
+    model.weights.checkpoint_set_bytes
+  );
 });
 
 console.log("");

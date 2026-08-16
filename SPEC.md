@@ -42,11 +42,12 @@ Each node:
 |---|---|---|---|
 | `id` | string | yes | Unique node identifier, referenced by links and placements |
 | `host` | string | no (default null) | Address, informational |
-| `gpus` | list, non-empty | yes | Accelerators on this node |
+| `gpus` | list, non-empty | yes | Accelerator **seats** on this node |
 | `links` | list | no (default `[]`) | Network links from this node |
 | `notes` | string | no (default `""`) | Freeform |
+| `runtimes` | list of string | no (default `[]`) | Execution engines installed on this node. A node offering none cannot execute a model however much VRAM it has |
 
-Each GPU:
+Each GPU entry describes an **accelerator seat**, not a board:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
@@ -54,6 +55,13 @@ Each GPU:
 | `vram_gb` | number | yes | Device memory in GB |
 | `name` | string | no (default `"GPU"`) | Human label, informational |
 | `mem_bw_gbps` | number | no (default null; required in strict mode) | Memory bandwidth in GB/s |
+| `uuid` | string | no (default null) | Identity of the **physical accelerator** currently in this seat |
+
+`index`, `vram_gb`, `name` and `mem_bw_gbps` are *seat capability*. They do not
+identify a board: two substantially identical cards match on every one of them.
+`uuid` is *board identity*, and when it is declared it must be unique across the
+cluster. Two seats declaring the same `uuid` describe one board twice, so their
+memory is not independent; a reader must **refuse** rather than sum it.
 
 Each link:
 
@@ -71,7 +79,7 @@ Each link:
 | `dtype` | string | yes | Weight precision: `fp32`, `fp16`, `bf16`, `fp8`, `int8`, `q8`, `int4`, `q4` |
 | `kv_cache` | string | no (default: `dtype`) | KV-cache precision |
 | `params` | integer | no | Total parameter count. For a mixture-of-experts model this is the **total**, not per-expert |
-| `bytes` | integer | no | Exact on-disk weight size in bytes. Highest precedence |
+| `bytes` | integer | no (**yes, to place**) | Exact on-disk weight size in bytes. Highest precedence |
 | `sha256` | string | no (default null) | Content identity of the measured model object, echoed into the plan as `model_object_sha256`. Declaring it is what lets a reader tell a measured object from an unverified declaration |
 
 `bytes` and `params` must each be a **finite, positive, whole number** when
@@ -113,6 +121,97 @@ Quantization and packaging move on-disk size by small factors, so smaller
 disagreements are tolerated; an order of magnitude means one field is stale, and
 silently preferring `bytes` would emit a confident plan built on a stale claim.
 
+### Placement evidence (`model`, continued)
+
+The fields above establish a model's declared **size and identity syntax**.
+None of them establishes that a specific measured object can be loaded and
+executed on specific devices. The fields below are that evidence, and they are
+what separates a plan that is *runnable* from one that is merely
+*representable*.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `weights` | object | **yes, to place** | The three byte quantities, below |
+| `identity` | object | **yes, to place** | Verified object identity binding, below |
+| `residence` | list | **yes, to place** | Where this object is verifiably resident |
+| `engines` | list of string | no (default `[]`) | Engines able to execute this model. Empty means unconstrained |
+| `sharding_strategy` | string | no (default `"pipeline"`) | How weights are decomposed across stages |
+
+#### `weights` — three quantities, three meanings
+
+| Field | Type | Meaning |
+|---|---|---|
+| `checkpoint_set_bytes` | integer | The complete on-disk checkpoint set. **What object custody binds.** |
+| `tensor_payload_bytes` | integer | The tensor payload. **What occupies device memory, and what is placed.** |
+| `container_overhead_bytes` | integer | Non-tensor container and header bytes; the difference between the two |
+
+All three are required together and must close:
+`tensor_payload_bytes + container_overhead_bytes = checkpoint_set_bytes`. A
+reader must **refuse** a partial or non-closing accounting rather than infer
+the missing quantity.
+
+Each is normalized by the same rules as `bytes` above: finite, positive, whole,
+and inside the exact integer range. `model.bytes` is the size that authorizes
+the placement, so when `weights` is declared `model.bytes` must equal
+`tensor_payload_bytes`; a reader must refuse otherwise.
+
+This is not bookkeeping pedantry. A real measurement of Kimi-K3 is 1560936091448
+checkpoint-set bytes, 1560860324864 tensor-payload bytes, and 75766584 bytes of
+safetensors headers across 96 shards. The headers are parsed on the host and
+never occupy device memory, while custody was computed over the whole set.
+Calling either total "model bytes" produces one number standing for two facts,
+and the layer below then resolves the ambiguity by guessing.
+
+#### `identity` — a declaration is not custody
+
+| Field | Type | Meaning |
+|---|---|---|
+| `identity_scheme` | string | Which scheme produced the digest, and therefore what it binds |
+| `identity_digest` | string | 64 hexadecimal characters |
+| `identity_source` | string | Where the verification came from: a receipt, a committed artifact, a coordinate |
+| `identity_state` | string | `VERIFIED` authorizes a placement. Anything else does not. |
+| `verified_at` | string | When the verification happened |
+| `validator` | string | What performed it |
+
+`model.sha256` is a *syntactically valid declaration*: it says a digest was
+written down. It does not say anyone computed one, under what scheme, over what
+material, or when. **Placement authority requires an `identity` binding whose
+`identity_state` is `VERIFIED`**, with every field above present and non-empty.
+A binding in any other state — or absent entirely — must produce a typed
+`UNVERIFIED_MODEL_IDENTITY` refusal. A digest that is merely declared cannot
+authorize putting bytes on a device.
+
+If both `model.sha256` and `identity.identity_digest` are present they must be
+equal; two identities for one object is not a precedence question, it means the
+manifest names two objects.
+
+A reader does **not** adjudicate which schemes count as custody — that is a
+policy decision belonging to whoever consumes the plan. What a conforming
+reader guarantees is that the scheme travels into the plan, so the decision is
+possible at all. A digest under `example/ascii-label-object@1` and one under a
+real custody scheme are both structurally valid and are not interchangeable,
+and the artifact says which is which.
+
+#### `residence` — per node, per object, per moment
+
+Each residence record: `node` (string, required), `verified` (bool, default
+false), `identity_digest` (string, optional), `freshness` (string, default
+`CURRENT`), `path`, `verified_at`, `validator` (all optional).
+
+A record whose `identity_digest` names a different object is **refused**, not
+ignored — silently skipping it degrades to "no residence declared" and hides a
+manifest that is actively wrong. A verified record whose `freshness` is
+anything but `CURRENT` is refused as stale: where the bytes were when they were
+last checked is not a statement that they are there now.
+
+#### `runtimes` — declared is not measured
+
+A node's `runtimes` entries may be objects `{engine, compatibility}` or bare
+strings. A bare string normalizes to `compatibility: "UNMEASURED"`, and only
+`MEASURED` runtimes can support a placement. Naming software is not observing
+it run; treating `UNMEASURED` as compatible authorizes a placement against a
+runtime nobody has ever exercised.
+
 ### `policy`
 
 All optional, with defaults:
@@ -138,9 +237,10 @@ A plan is a JSON object. Version 1 keys:
 |---|---|---|
 | `schema_version` | integer | `1` |
 | `model` | object | `name`, `dtype`, `kv_cache` echoed from manifest; `estimated_model_gb` (number), `model_size_bytes` (integer), `model_size_source` (string), `model_object_sha256` (string or null) added by the planner |
-| `cluster` | object | `name`; `nodes`: sorted list of node ids; `gpus`: flattened list of GPU records (`node`, `host`, `gpu` [the index], `name`, `vram_gb`, `mem_bw_gbps`) |
+| `cluster` | object | `name`; `nodes`: sorted list of node ids; `gpus`: flattened list of seat records (`node`, `host`, `gpu` [the index], `name`, `vram_gb`, `mem_bw_gbps`, `accelerator_uuid`) |
 | `policy` | object | The manifest policy after defaulting, echoed verbatim |
 | `pipeline_stages` | list | Ordered stages; each `{stage: int, placement: [{node: string, gpu: int}]}` |
+| `placement` | object | Whether this plan is runnable, and the proof if it is — see below |
 | `kv_cache_policy` | object | `reserve_gb_per_gpu` (number), `spill_allowed` (bool) |
 | `health` | object | `replan_on_gpu_oom` (bool), `replan_on_node_loss` (bool) — replan triggers, not engine config |
 | `diagnostics` | object | `stage_boundary_costs`: list of numbers, one per adjacent stage pair (dimensionless penalty; higher is worse; ≥1e6 means a boundary the planner considers saturated); `notes`: string |
@@ -175,6 +275,122 @@ A plan is a JSON object. Version 1 keys:
   evidence status as a measured model object. `model_object_sha256` is null
   unless the manifest declared the identity of the object that was measured; a
   declared `bytes` with no `sha256` is an unverified claim, not a measurement.
+
+### `placement` — runnable, or merely representable
+
+A plan says which of two things it is, in a field, because the defect this
+schema exists to close is that the two used to be the same artifact.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `state` | string | `RUNNABLE` or `REPRESENTABLE_NOT_RUNNABLE` |
+| `missing_predicates` | list of string | Which placement predicates the manifest never claimed. Empty when runnable. |
+| `proof` | object or null | The placement proof, below. Null when not runnable. |
+
+A writer classifies as follows, and the three cases are exhaustive:
+
+- **Contradicted evidence** — a duplicate physical accelerator, an unverified
+  identity, stale or mismatched residence, an unmeasured runtime, an
+  unsupported sharding strategy, a non-closing weight accounting, or a stage or
+  device that cannot hold what it was assigned — is a typed **refusal**. No
+  plan is emitted.
+- **Complete evidence that proves out** is `RUNNABLE`, with `proof` present.
+- **Absent evidence** is `REPRESENTABLE_NOT_RUNNABLE`. The topology is real and
+  the plan is a useful description of it; nothing in it establishes that a
+  specific measured object can be loaded and executed there, and
+  `missing_predicates` names exactly what was never claimed:
+  `verified_object_identity`, `declared_weight_accounting`,
+  `verified_residence`, `measured_runtime`.
+
+Placement is *attempted* when the manifest declares object-level evidence —
+`identity`, `residence`, or `weights`. Topology alone is not a placement claim:
+a manifest describing hardware and a model name is describing a cluster, and
+seat UUIDs and node runtimes are hardware description.
+
+A writer that cannot observe residence, runtime compatibility, or physical
+execution — the published browser planner, for instance, which has no view of a
+remote node's disk and no way to run an engine — may evaluate an evidence
+packet the manifest supplies, and may display hypothetical topology. It must
+not infer any predicate from topology, and must not label a plan `RUNNABLE`
+without the same evidence the reference implementation requires.
+
+#### `placement.proof`
+
+A plan must carry the evidence that it fits, not merely the assertion.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `identity` | object | The verified identity binding that authorized the placement, carried whole |
+| `sharding_strategy` | string | The decomposition this proof is about |
+| `weights` | object | All three byte quantities, unchanged from the manifest |
+| `placed_bytes_are` | string | `"tensor_payload_bytes"` — which quantity was apportioned |
+| `custody_binds` | string | `"checkpoint_set_bytes"` — which quantity identity binds |
+| `assigned_bytes_total` | integer | Sum of all stage assignments; equals `tensor_payload_bytes` |
+| `stages` | list | Per stage: `stage`, `assigned_bytes`, `usable_bytes`, and `devices` |
+| `diagnostics` | object | `aggregate_usable_bytes`, `aggregate_is_not_an_admission_criterion` |
+
+Each device record: `node`, `gpu`, `accelerator_uuid`, `assigned_bytes`,
+`usable_bytes`, `engine`, `residence_verified`.
+
+`placed_bytes_are` and `custody_binds` are in the artifact rather than in this
+document alone, so a reader never has to know which byte total a given field
+meant.
+
+**Independent VRAM is never summed into a pooled address space to admit a
+placement.** Aggregate capacity across devices is at best a necessary condition
+and never a sufficient one, because independent devices do not share an address
+space. A conforming writer must therefore:
+
+1. assign exact tensor-payload bytes to every stage, and inside each stage to
+   every device, so that the assignments sum to `tensor_payload_bytes` with no
+   byte lost or invented by rounding;
+2. admit a stage only when that stage's **own** seats can hold their **own**
+   assigned bytes;
+3. count a seat's capacity as zero unless the object is verifiably and
+   currently resident on its node **and** that node offers a measured engine
+   able to execute the model — memory that cannot be loaded or executed is not
+   placement capacity;
+4. subtract `reserve_gb_per_gpu` **per device, clamped at zero**, never as
+   `reserve × device_count` from a pooled total, which lets a small device lend
+   its shortfall to a large one.
+
+`aggregate_usable_bytes` is reported for diagnosis only, and the plan says so in
+the artifact itself.
+
+A writer may apply an aggregate screen *only* to refuse, and only where no
+proof is possible: when no placement evidence was supplied, a model larger than
+every device put together certainly does not fit, and saying so is more useful
+than emitting a sketch. Such a screen may never admit anything, and a plan that
+survives it is `REPRESENTABLE_NOT_RUNNABLE`, never `RUNNABLE`.
+
+## Refusal (output)
+
+When a placement cannot be proved, the writer emits a refusal. A refusal is a
+real artifact and is written where the plan would have been, because the reason
+a placement did not happen is worth recording and diffing.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | integer | `1` |
+| `result` | string | `"refusal"` |
+| `code` | string | Machine-readable reason; readers branch on this, never on prose |
+| `message` | string | Human-readable explanation |
+| `detail` | object | Code-specific facts (stage, node, gpu, byte counts, deficits) |
+
+Codes: `WEIGHT_ACCOUNTING_MISSING`, `WEIGHT_ACCOUNTING_INCONSISTENT`,
+`WEIGHT_ACCOUNTING_CONFLICT`, `UNVERIFIED_MODEL_IDENTITY`,
+`SEAT_IDENTITY_CONFLICT`, `RESIDENCE_UNVERIFIED`, `RESIDENCE_STALE`,
+`RESIDENCE_IDENTITY_MISMATCH`, `NO_SUPPORTED_ENGINE`, `RUNTIME_UNMEASURED`,
+`UNSUPPORTED_SHARDING_STRATEGY`, `STAGE_DOES_NOT_FIT`, `DEVICE_DOES_NOT_FIT`,
+`NO_ADMISSIBLE_SEAT`.
+
+The reference CLI writes the refusal to `--out` and exits `2`.
+
+Refusals raised by the size-and-identity layer — an unresolvable model size, a
+contradictory pair of size claims, a malformed `sha256` — carry no code. That
+layer answers a different question (*what did the manifest say the object is?*)
+than the placement layer (*can this object run here?*), and it predates typed
+codes. A reader distinguishes them by the presence of `code`.
 
 ## Reference model-size estimation (informative, not normative)
 
