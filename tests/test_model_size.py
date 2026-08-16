@@ -141,6 +141,101 @@ class ContradictorySizeClaimsFailClosed(unittest.TestCase):
         self.assertEqual(plan["model"]["model_size_source"], "manifest_bytes")
 
 
+class ImpossibleSizeDeclarationsAreRefused(unittest.TestCase):
+    """A declared size still has to be a size.
+
+    Zero and negative values are the sharp cases: they satisfy every
+    feasibility comparison, so they do not merely mis-size a plan, they
+    authorize any placement at all.
+    """
+
+    IMPOSSIBLE = [
+        ("zero", 0),
+        ("negative", -1),
+        ("fractional", 1.5),
+        ("boolean", True),
+        ("string", "34359738368"),
+        ("none-typed", []),
+        ("nan", float("nan")),
+        ("infinite", float("inf")),
+    ]
+
+    def test_impossible_bytes_are_refused(self):
+        for label, value in self.IMPOSSIBLE:
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError) as caught:
+                    build_plan(manifest({"name": "some-model", "dtype": "fp8",
+                                         "bytes": value}))
+                self.assertIn("model.bytes", str(caught.exception))
+
+    def test_impossible_params_are_refused(self):
+        for label, value in self.IMPOSSIBLE:
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError) as caught:
+                    build_plan(manifest({"name": "some-model", "dtype": "fp8",
+                                         "params": value}))
+                self.assertIn("model.params", str(caught.exception))
+
+    def test_a_zero_size_does_not_authorize_a_placement(self):
+        # Without validation this returned a plan: 0 GB fits anything.
+        with self.assertRaises(ValueError):
+            build_plan(manifest({"name": "some-model", "dtype": "fp8", "bytes": 0}))
+
+    def test_an_excessively_large_size_refuses_rather_than_authorizing(self):
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "some-model", "dtype": "fp8",
+                                 "bytes": 10**30}))
+        self.assertIn("Insufficient VRAM", str(caught.exception))
+
+
+class ModelObjectIdentityIsValidated(unittest.TestCase):
+    """An identity that cannot be checked must not be published as one."""
+
+    def test_malformed_digests_are_refused(self):
+        for label, value in [("too short", "abc"), ("non-hex", "z" * 64),
+                             ("numeric", 12345), ("too long", "a" * 65)]:
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError) as caught:
+                    build_plan(manifest({"name": "llama-3-70b", "dtype": "q4",
+                                         "sha256": value}))
+                self.assertIn("model.sha256", str(caught.exception))
+
+    def test_a_valid_digest_is_normalized_into_the_plan(self):
+        plan = build_plan(manifest({"name": "llama-3-70b", "dtype": "q4",
+                                    "sha256": "A" * 64}))
+        self.assertEqual(plan["model"]["model_object_sha256"], "a" * 64)
+
+
+class NameTokensNeedBoundaries(unittest.TestCase):
+    """Substring capture is the same defect as the MoE multiplier.
+
+    "model-170b" containing "70b" produced a confident underestimate for a
+    model whose size the heuristic never actually knew.
+    """
+
+    def test_170b_is_not_read_as_70b(self):
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "model-170b", "dtype": "q4"}))
+        self.assertIn("170b", str(caught.exception))
+
+    def test_107b_is_not_read_as_7b(self):
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "model-107b", "dtype": "q4"}))
+        self.assertIn("107b", str(caught.exception))
+
+    def test_an_ambiguous_pair_of_tokens_is_refused(self):
+        with self.assertRaises(ValueError):
+            build_plan(manifest({"name": "frankenmerge-13b-7b", "dtype": "q4"}))
+
+    def test_supported_tokens_still_resolve(self):
+        for token, expected_gb in [("llama-3-70b", 32.6), ("model-34b", 15.83),
+                                   ("model-13b", 6.05), ("model-7b", 3.26)]:
+            with self.subTest(token=token):
+                plan = build_plan(manifest({"name": token, "dtype": "q4"}))
+                self.assertAlmostEqual(
+                    plan["model"]["estimated_model_gb"], expected_gb, places=2)
+
+
 class RealKimiK3DoesNotFitFourThreeNineties(unittest.TestCase):
     """The measured object, against the measured hardware.
 

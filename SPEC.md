@@ -74,6 +74,16 @@ Each link:
 | `bytes` | integer | no | Exact on-disk weight size in bytes. Highest precedence |
 | `sha256` | string | no (default null) | Content identity of the measured model object, echoed into the plan as `model_object_sha256`. Declaring it is what lets a reader tell a measured object from an unverified declaration |
 
+`bytes` and `params` must each be a **finite, positive, whole number** when
+present. A reader must refuse zero, negative, fractional, non-finite, boolean,
+and non-numeric declarations rather than coerce them. This is not pedantry: a
+zero or negative size satisfies every feasibility comparison, so it does not
+merely mis-size a plan, it authorizes any placement at all.
+
+`sha256`, when present, must be exactly 64 hexadecimal characters. A reader
+must refuse anything else rather than emit it as `model_object_sha256`, since
+an identity that cannot be checked is not an identity.
+
 Size precedence is `bytes`, then `params` × bytes-per-parameter, then inference
 from `name`. A declared size always wins over the name.
 
@@ -144,9 +154,16 @@ matching `model_size_source` in the plan:
 1. `model.bytes`, used exactly (`manifest_bytes`);
 2. `model.params` × bytes-per-parameter for `dtype`
    (`manifest_params_and_quantization`);
-3. inference from `model.name` via the `70b`, `34b`, `13b`, `7b` substrings
-   (checked longest-first, so `70b` is not shadowed by `7b`)
-   (`legacy_name_heuristic`).
+3. inference from `model.name` via the `7b`, `13b`, `34b`, `70b` parameter
+   tokens (`legacy_name_heuristic`).
+
+A parameter token is a **complete** number followed by `b`, delimited so that
+it is neither preceded by a digit or decimal point nor followed by another
+letter or digit. `model-170b` therefore does not match `70b`, and `model-107b`
+does not match `7b`; both refuse. A name carrying a token outside the supported
+set, or carrying more than one distinct token, also refuses — the planner does
+not round a name to the nearest size it happens to know. Because tokens are
+matched whole, match ordering no longer affects the result.
 
 Bytes-per-parameter is 4 for fp32; 2 for fp16/bf16 and unknown dtypes; 1 for
 fp8/int8/q8; 0.5 for int4/q4. Feasibility requires usable VRAM (total minus

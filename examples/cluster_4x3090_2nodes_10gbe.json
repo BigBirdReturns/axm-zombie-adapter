@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "cluster": {
+    "name": "zombie-2nodes",
+    "nodes": [
+      {
+        "id": "node-a",
+        "host": "192.168.1.10",
+        "gpus": [
+          {
+            "index": 0,
+            "name": "RTX_3090",
+            "vram_gb": 24,
+            "mem_bw_gbps": 936
+          },
+          {
+            "index": 1,
+            "name": "RTX_3090",
+            "vram_gb": 24,
+            "mem_bw_gbps": 936
+          }
+        ],
+        "links": [
+          {
+            "type": "ethernet",
+            "to": "node-b",
+            "gbps": 10
+          }
+        ]
+      },
+      {
+        "id": "node-b",
+        "host": "192.168.1.11",
+        "gpus": [
+          {
+            "index": 0,
+            "name": "RTX_3090",
+            "vram_gb": 24,
+            "mem_bw_gbps": 936
+          },
+          {
+            "index": 1,
+            "name": "RTX_3090",
+            "vram_gb": 24,
+            "mem_bw_gbps": 936
+          }
+        ],
+        "links": [
+          {
+            "type": "ethernet",
+            "to": "node-a",
+            "gbps": 10
+          }
+        ]
+      }
+    ]
+  },
+  "model": {
+    "name": "llama-3-70b",
+    "dtype": "q4",
+    "kv_cache": "fp16"
+  },
+  "policy": {
+    "target_tps": 18,
+    "max_latency_ms": 250,
+    "prefer_bandwidth": true,
+    "allow_cpu_offload": false,
+    "reserve_gb_per_gpu": 4.0
+  }
+}
