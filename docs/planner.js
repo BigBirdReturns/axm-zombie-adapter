@@ -64,13 +64,18 @@
   // contradiction, not a precedence question. See planner.py.
   const SIZE_CONFLICT_FACTOR = 10.0;
 
-  // Longest-first so "70b" is not shadowed by "7b".
-  const KNOWN_PARAMS = [
-    ["70b", 70e9],
-    ["34b", 34e9],
-    ["13b", 13e9],
-    ["7b", 7e9],
-  ];
+  // Parameter counts the name heuristic recognises, keyed by the token in
+  // billions. Tokens are matched whole (see PARAM_TOKEN), so ordering is
+  // irrelevant: "170b" is not a 70B model and "107b" is not a 7B model.
+  const KNOWN_PARAM_TOKENS = { 7: 7e9, 13: 13e9, 34: 34e9, 70: 70e9 };
+
+  // Identical in form to planner.py's _PARAM_TOKEN, using a leading
+  // alternation rather than a lookbehind so both writers recognise exactly the
+  // same names on every runtime.
+  const PARAM_TOKEN = /(?:^|[^\d.])(\d+)\s*b(?![a-z0-9])/g;
+
+  // A model object identity is a sha-256 digest or it is not an identity.
+  const SHA256 = /^[0-9a-f]{64}$/;
 
   // "8x7b", "4 x 22b": a mixture-of-experts multiplier makes a bare parameter
   // substring a lie. mixtral-8x7b is ~46.7B, not 7B.
@@ -80,6 +85,53 @@
     const table = { fp32: 4.0, fp16: 2.0, bf16: 2.0, fp8: 1.0, int8: 1.0, q8: 1.0, int4: 0.5, q4: 0.5 };
     const key = String(dtype).toLowerCase();
     return table[key] !== undefined ? table[key] : 2.0;
+  }
+
+  // Mirrors planner.py's _validated_size_field. A zero, negative, or NaN size
+  // satisfies every feasibility comparison, so it authorizes any placement.
+  function validatedSizeField(value, field, name) {
+    const unit = field === "bytes" ? "bytes" : "parameters";
+    if (typeof value !== "number") {
+      throw new Error(
+        `model.${field} for '${name}' must be a positive whole number of ${unit}, ` +
+        `got ${JSON.stringify(value)} (${typeof value}). A size that is not a ` +
+        "number cannot be compared against VRAM, and the planner will not " +
+        "coerce it into one."
+      );
+    }
+    if (!Number.isFinite(value)) {
+      throw new Error(
+        `model.${field} for '${name}' must be finite, got ${String(value)}. ` +
+        "A non-finite size never fails the feasibility check."
+      );
+    }
+    if (!Number.isInteger(value)) {
+      throw new Error(
+        `model.${field} for '${name}' must be a whole number of ${unit}, got ${value}.`
+      );
+    }
+    if (value <= 0) {
+      throw new Error(
+        `model.${field} for '${name}' must be greater than zero, got ${value}. ` +
+        "A zero or negative size passes every feasibility check and would " +
+        "authorize any placement."
+      );
+    }
+    return value;
+  }
+
+  // Mirrors planner.py's _validated_sha256.
+  function validatedSha256(value, name) {
+    if (value === undefined || value === null) return null;
+    if (typeof value === "string" && SHA256.test(value.trim().toLowerCase())) {
+      return value.trim().toLowerCase();
+    }
+    throw new Error(
+      `model.sha256 for '${name}' must be 64 hexadecimal characters ` +
+      `identifying the measured model object, got ${JSON.stringify(value)}. An ` +
+      "unverifiable identity must not be emitted as model_object_sha256, " +
+      "because the whole point of the field is that it can be checked."
+    );
   }
 
   function refuseContradictorySizeClaims(name, declared, params, implied, dtype) {
@@ -109,17 +161,19 @@
     const declaredParams = model.params !== undefined && model.params !== null ? model.params : null;
 
     if (declaredBytes !== null) {
-      const size = Math.trunc(Number(declaredBytes));
+      const size = validatedSizeField(declaredBytes, "bytes", name);
       if (declaredParams !== null) {
-        const implied = Math.trunc(Number(declaredParams) * bytesPerParam(dtype));
-        refuseContradictorySizeClaims(name, size, declaredParams, implied, dtype);
+        const params = validatedSizeField(declaredParams, "params", name);
+        const implied = Math.trunc(params * bytesPerParam(dtype));
+        refuseContradictorySizeClaims(name, size, params, implied, dtype);
       }
       return { bytes: size, source: SIZE_SOURCE_MANIFEST_BYTES };
     }
 
     if (declaredParams !== null) {
+      const params = validatedSizeField(declaredParams, "params", name);
       return {
-        bytes: Math.trunc(Number(declaredParams) * bytesPerParam(dtype)),
+        bytes: Math.trunc(params * bytesPerParam(dtype)),
         source: SIZE_SOURCE_MANIFEST_PARAMS,
       };
     }
@@ -132,10 +186,30 @@
         "(total parameters, not per-expert) or model.bytes in the manifest."
       );
     }
-    for (const [token, params] of KNOWN_PARAMS) {
-      if (lowered.includes(token)) {
-        return { bytes: Math.trunc(params * bytesPerParam(dtype)), source: SIZE_SOURCE_NAME_HEURISTIC };
-      }
+    const tokens = [];
+    PARAM_TOKEN.lastIndex = 0;
+    let match;
+    while ((match = PARAM_TOKEN.exec(lowered)) !== null) {
+      const value = parseInt(match[1], 10);
+      if (!tokens.includes(value)) tokens.push(value);
+    }
+    tokens.sort((a, b) => a - b);
+    if (tokens.length === 1 && KNOWN_PARAM_TOKENS[tokens[0]] !== undefined) {
+      return {
+        bytes: Math.trunc(KNOWN_PARAM_TOKENS[tokens[0]] * bytesPerParam(dtype)),
+        source: SIZE_SOURCE_NAME_HEURISTIC,
+      };
+    }
+    if (tokens.length > 0) {
+      const supported = Object.keys(KNOWN_PARAM_TOKENS).map(Number).sort((a, b) => a - b);
+      throw new Error(
+        `Model name '${name}' carries parameter token(s) ` +
+        `${tokens.map((t) => t + "b").join(", ")} that the size heuristic ` +
+        "cannot resolve; it recognises exactly " +
+        `${supported.map((t) => t + "b").join(", ")} and will not round a name ` +
+        "to the nearest supported size. Declare model.params or model.bytes " +
+        "in the manifest."
+      );
     }
     throw new Error(
       `Unknown model size for '${name}'. The planner will not assume a ` +
@@ -197,6 +271,7 @@
 
     const totalVram = gpus.reduce((s, g) => s + g.vram_gb, 0);
     const resolved = resolveModelSize(model);
+    const modelSha256 = validatedSha256(model.sha256, model.name);
     const modelBytes = resolved.bytes;
     const modelGb = modelBytes / Math.pow(1024, 3);
 
@@ -248,7 +323,7 @@
         estimated_model_gb: Math.round(modelGb * 100) / 100,
         model_size_bytes: modelBytes,
         model_size_source: resolved.source,
-        model_object_sha256: model.sha256 !== undefined ? model.sha256 : null,
+        model_object_sha256: modelSha256,
       },
       cluster: {
         name: manifest.cluster.name !== undefined ? manifest.cluster.name : "zombie",
@@ -309,7 +384,13 @@
     return m;
   }
 
-  const api = { normalizeManifest, buildPlan, degradeManifest, estimateModelBytes, linkBwBetween, SCHEMA_VERSION };
+  // `estimateModelBytes` is deliberately removed rather than wrapped. It
+  // returned a size with no indication of where the size came from, which is
+  // precisely the ambiguity this module now exists to prevent; a compatibility
+  // shim would keep that accessor alive as a supported way to get an
+  // unattributed number. `resolveModelSize` replaces it and returns
+  // { bytes, source }. Nothing in docs/ consumed the old export.
+  const api = { normalizeManifest, buildPlan, degradeManifest, resolveModelSize, linkBwBetween, SCHEMA_VERSION };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.axmZombie = api;
 })(typeof self !== "undefined" ? self : this);
