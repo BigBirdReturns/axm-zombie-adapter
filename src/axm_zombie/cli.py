@@ -84,3 +84,9 @@ def main():
         EXPORTERS[args.target](plan, outdir)
         print(f"Wrote exporter artifacts to {outdir.resolve()}")
         return
+
+
+# Without this, `python -m axm_zombie.cli ...` exits 0 having done nothing.
+# The console script requires an install; this path does not.
+if __name__ == "__main__":
+    main()

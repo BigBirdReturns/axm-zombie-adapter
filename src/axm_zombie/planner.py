@@ -1,30 +1,245 @@
 from __future__ import annotations
 from typing import Any, Dict, List
 import math
+import re
 
-def _estimate_model_bytes(model_name: str, dtype: str) -> int:
-    name = model_name.lower()
-    if "70b" in name:
-        params = 70_000_000_000
-    elif "34b" in name:
-        params = 34_000_000_000
-    elif "13b" in name:
-        params = 13_000_000_000
-    elif "7b" in name:
-        params = 7_000_000_000
-    else:
-        params = 30_000_000_000
-    bytes_per_param = {
-        "fp32": 4.0,
-        "fp16": 2.0,
-        "bf16": 2.0,
-        "fp8": 1.0,
-        "int8": 1.0,
-        "q8": 1.0,
-        "int4": 0.5,
-        "q4": 0.5,
-    }.get(dtype.lower(), 2.0)
-    return int(params * bytes_per_param)
+# Distinguishes "the manifest did not declare this field" from "the manifest
+# declared it as null". `None` cannot carry that distinction, and the two mean
+# opposite things for a size claim.
+_ABSENT = object()
+
+_BYTES_PER_PARAM = {
+    "fp32": 4.0,
+    "fp16": 2.0,
+    "bf16": 2.0,
+    "fp8": 1.0,
+    "int8": 1.0,
+    "q8": 1.0,
+    "int4": 0.5,
+    "q4": 0.5,
+}
+
+# Parameter counts the name heuristic recognises, keyed by the token in
+# billions. Tokens are matched whole (see _PARAM_TOKEN), so ordering is
+# irrelevant: "170b" is not a 70B model and "107b" is not a 7B model.
+_KNOWN_PARAM_TOKENS = {
+    7: 7_000_000_000,
+    13: 13_000_000_000,
+    34: 34_000_000_000,
+    70: 70_000_000_000,
+}
+
+# A parameter token is a complete number followed by "b". The leading
+# alternation (rather than a lookbehind) keeps this pattern identical in
+# JavaScript, so both plan writers recognise exactly the same names.
+_PARAM_TOKEN = re.compile(r"(?:^|[^\d.])(\d+)\s*b(?![a-z0-9])")
+
+# A model object identity is a sha-256 digest or it is not an identity.
+_SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
+
+# "8x7b", "4 x 22b": a mixture-of-experts multiplier makes a bare parameter
+# substring a lie. mixtral-8x7b is ~46.7B, not 7B.
+#
+# The trailing delimiter is the same law _PARAM_TOKEN uses, and it has to be:
+# `\b` treats "_" as a word character, so "mixtral-8x7b_model" ended the MoE
+# match at a non-boundary and escaped this check -- while _PARAM_TOKEN's
+# `(?![a-z0-9])` happily accepted the same "_" and read the name as a 7B model.
+# One delimiter law for both patterns is what keeps a name from being MoE for
+# the refusal and plain for the heuristic. The leading side is deliberately
+# left unanchored: this pattern only ever refuses, so matching more of the
+# string than _PARAM_TOKEN can is fail-closed.
+_MOE_MULTIPLIER = re.compile(r"\d+\s*x\s*\d+\s*b(?![a-z0-9])")
+
+# Sizes are exchanged as JSON numbers and read by a JavaScript writer whose
+# only numeric type is a double. Above 2**53-1 a byte count no longer survives
+# that round trip -- 9007199254740993 is read back as 9007199254740992 -- so a
+# declaration beyond this magnitude is refused by both writers rather than
+# silently rounded and then published as the size that authorized a placement.
+MAX_EXACT_INTEGER = 2**53 - 1
+
+# One gibibyte. `estimated_model_gb` is derived from this by exact integer
+# arithmetic (see _estimated_gb) rather than by float rounding, because the two
+# writers' native round() disagree at a decimal tie.
+_GIB = 1024**3
+
+# How the size that authorized a placement was obtained. A plan carries this so
+# a declared measurement and a name guess are never read as the same evidence.
+SIZE_SOURCE_MANIFEST_BYTES = "manifest_bytes"
+SIZE_SOURCE_MANIFEST_PARAMS = "manifest_params_and_quantization"
+SIZE_SOURCE_NAME_HEURISTIC = "legacy_name_heuristic"
+
+# Two declared size claims that disagree by this factor or more are a
+# contradiction, not a precedence question. Quantization and packaging move the
+# on-disk size by small factors; an order of magnitude means one field is stale,
+# and silently preferring `bytes` would rebuild the false-plan defect through a
+# different input channel.
+SIZE_CONFLICT_FACTOR = 10.0
+
+
+def _bytes_per_param(dtype: str) -> float:
+    return _BYTES_PER_PARAM.get(str(dtype).lower(), 2.0)
+
+
+def _estimated_gb(model_bytes: int) -> float:
+    """Bytes -> GiB at two decimals under one explicit rounding law.
+
+    Half-way values round up (away from zero). This is spelled out in exact
+    integer arithmetic instead of `round(bytes / 1024**3, 2)` because the two
+    plan writers disagree about what `round` means at a tie: Python rounds
+    half to even and gives 1.12 for 1207959552 B, while JavaScript's
+    Math.round rounds half up and gives 1.13. Neither is wrong; having two of
+    them is. `scaled` is the exact numerator, so the comparison
+    `2 * remainder >= _GIB` is the tie test with no floating point in it.
+    """
+    scaled = model_bytes * 100
+    whole, remainder = divmod(scaled, _GIB)
+    if 2 * remainder >= _GIB:
+        whole += 1
+    return whole / 100
+
+
+def _validated_size_field(value: Any, field: str, name: str) -> int:
+    """Refuse a size declaration that cannot describe a real object.
+
+    A zero or negative size satisfies every feasibility comparison, so it
+    authorizes any placement at all. That is the same false-authorization the
+    name heuristic used to produce, reached through a declared field instead.
+    """
+    unit = "bytes" if field == "bytes" else "parameters"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"model.{field} for {name!r} must be a positive whole number of "
+            f"{unit}, got {value!r} ({type(value).__name__}). A size that is "
+            "not a number cannot be compared against VRAM, and the planner "
+            "will not coerce it into one."
+        )
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            raise ValueError(
+                f"model.{field} for {name!r} must be finite, got {value!r}. "
+                "A non-finite size never fails the feasibility check."
+            )
+        if not value.is_integer():
+            raise ValueError(
+                f"model.{field} for {name!r} must be a whole number of {unit}, "
+                f"got {value!r}."
+            )
+    resolved = int(value)
+    if abs(resolved) > MAX_EXACT_INTEGER:
+        raise ValueError(
+            f"model.{field} for {name!r} must lie within the exact integer "
+            f"range of +/-{MAX_EXACT_INTEGER} {unit}, got {resolved}. Beyond "
+            "that magnitude the value cannot be represented exactly by both "
+            "plan writers, and rounding an asserted size would publish a "
+            "number nobody asserted as the size that authorized a placement."
+        )
+    if resolved <= 0:
+        raise ValueError(
+            f"model.{field} for {name!r} must be greater than zero, got "
+            f"{resolved}. A zero or negative size passes every feasibility "
+            "check and would authorize any placement."
+        )
+    return resolved
+
+
+def _validated_sha256(value: Any, name: str) -> Any:
+    """Refuse to publish an unparseable string as model object identity."""
+    if value is None:
+        return None
+    if isinstance(value, str) and _SHA256.match(value.strip().lower()):
+        return value.strip().lower()
+    raise ValueError(
+        f"model.sha256 for {name!r} must be 64 hexadecimal characters "
+        f"identifying the measured model object, got {value!r}. An "
+        "unverifiable identity must not be emitted as model_object_sha256, "
+        "because the whole point of the field is that it can be checked."
+    )
+
+
+def _refuse_contradictory_size_claims(
+    name: str, declared: int, params: Any, implied: int, dtype: str
+) -> None:
+    """Fail closed when `bytes` and `params` describe different objects."""
+    lo, hi = sorted((declared, implied))
+    ratio = float("inf") if lo <= 0 else hi / lo
+    if ratio < SIZE_CONFLICT_FACTOR:
+        return
+    gap = "unbounded" if ratio == float("inf") else f"{ratio:.1f}x"
+    raise ValueError(
+        f"Size-claim conflict for {name!r}: model.bytes declares {declared} B, "
+        f"but model.params ({params}) at {_bytes_per_param(dtype)} bytes/param "
+        f"for dtype {dtype!r} implies {implied} B - a {gap} disagreement. The "
+        "planner will not pick a winner between two contradictory claims, "
+        "because a stale size field produces a confident plan that OOMs. "
+        "Correct model.bytes or model.params so the two agree within a factor "
+        f"of {SIZE_CONFLICT_FACTOR:.0f}."
+    )
+
+
+def _resolve_model_size(model: Dict[str, Any]) -> tuple[int, str]:
+    """Return (size in bytes, how that size was obtained).
+
+    Declared size always wins over inference from the name. When the size can be
+    neither declared nor inferred unambiguously, this refuses instead of
+    guessing: a wrong guess here is emitted as a confident placement plan that
+    OOMs on contact with real hardware. The source travels with the size so a
+    downstream reader can tell a measured object from a name guess.
+    """
+    dtype = model.get("dtype", "")
+    name = str(model.get("name", ""))
+
+    # Presence and value are separate facts. An absent `bytes` key means "no
+    # size was declared, fall through to params or the name"; a present
+    # `bytes: null` means "a size was declared and it is nothing", which is not
+    # a size. Reading both as None let an explicitly empty declaration fall
+    # through to the name heuristic, so a manifest that declared its size ended
+    # up authorized by a guess -- and said so in `model_size_source`.
+    declared_bytes = model["bytes"] if "bytes" in model else _ABSENT
+    declared_params = model["params"] if "params" in model else _ABSENT
+
+    if declared_bytes is not _ABSENT:
+        size = _validated_size_field(declared_bytes, "bytes", name)
+        if declared_params is not _ABSENT:
+            params = _validated_size_field(declared_params, "params", name)
+            implied = int(params * _bytes_per_param(dtype))
+            _refuse_contradictory_size_claims(name, size, params, implied, dtype)
+        return size, SIZE_SOURCE_MANIFEST_BYTES
+
+    if declared_params is not _ABSENT:
+        params = _validated_size_field(declared_params, "params", name)
+        return (
+            int(params * _bytes_per_param(dtype)),
+            SIZE_SOURCE_MANIFEST_PARAMS,
+        )
+
+    lowered = name.lower()
+    if _MOE_MULTIPLIER.search(lowered):
+        raise ValueError(
+            f"Model {name!r} carries a mixture-of-experts multiplier, so its "
+            "parameter count cannot be read from its name. Declare model.params "
+            "(total parameters, not per-expert) or model.bytes in the manifest."
+        )
+    tokens = sorted({int(m.group(1)) for m in _PARAM_TOKEN.finditer(lowered)})
+    if len(tokens) == 1 and tokens[0] in _KNOWN_PARAM_TOKENS:
+        return (
+            int(_KNOWN_PARAM_TOKENS[tokens[0]] * _bytes_per_param(dtype)),
+            SIZE_SOURCE_NAME_HEURISTIC,
+        )
+    if tokens:
+        raise ValueError(
+            f"Model name {name!r} carries parameter token(s) "
+            f"{', '.join(f'{t}b' for t in tokens)} that the size heuristic "
+            f"cannot resolve; it recognises exactly "
+            f"{', '.join(f'{t}b' for t in sorted(_KNOWN_PARAM_TOKENS))} and "
+            "will not round a name to the nearest supported size. Declare "
+            "model.params or model.bytes in the manifest."
+        )
+    raise ValueError(
+        f"Unknown model size for {name!r}. The planner will not assume a "
+        "default parameter count, because the resulting plan would look "
+        "identical to a correct one. Declare model.params or model.bytes "
+        "in the manifest."
+    )
 
 def _cluster_gpus(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
     gpus: List[Dict[str, Any]] = []
@@ -72,14 +287,16 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
     gpus = _cluster_gpus(manifest)
 
     total_vram = sum(g["vram_gb"] for g in gpus)
-    model_bytes = _estimate_model_bytes(model["name"], model["dtype"])
-    model_gb = model_bytes / (1024**3)
+    model_bytes, size_source = _resolve_model_size(model)
+    model_sha256 = _validated_sha256(model.get("sha256"), model["name"])
+    model_gb = model_bytes / _GIB
 
     reserve_gb_per_gpu = float(policy.get("reserve_gb_per_gpu", 4.0))
     usable_vram = max(0.0, total_vram - reserve_gb_per_gpu * len(gpus))
     if usable_vram < model_gb * 1.05:
         raise ValueError(
-            f"Insufficient VRAM for rough model estimate. Usable ~{usable_vram:.1f} GB, model ~{model_gb:.1f} GB."
+            f"Insufficient VRAM for rough model estimate. Usable ~{usable_vram:.1f} GB, "
+            f"model ~{model_gb:.1f} GB (size {model_bytes} B from {size_source})."
         )
 
     node_ids = sorted(list({g["node"] for g in gpus}))
@@ -118,7 +335,10 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
             "name": model["name"],
             "dtype": model["dtype"],
             "kv_cache": model.get("kv_cache", model["dtype"]),
-            "estimated_model_gb": round(model_gb, 2),
+            "estimated_model_gb": _estimated_gb(model_bytes),
+            "model_size_bytes": model_bytes,
+            "model_size_source": size_source,
+            "model_object_sha256": model_sha256,
         },
         "cluster": {
             "name": manifest["cluster"].get("name", "zombie"),

@@ -38,6 +38,14 @@ def test_yaml_and_json_singlebox_examples_agree():
     assert golden_check.plan_text(REPO / "examples" / "cluster_4x3090_singlebox.yaml") == \
         golden_check.plan_text(REPO / "examples" / "cluster_4x3090_singlebox.json")
 
+def test_yaml_and_json_2node_examples_agree():
+    # The JSON twin exists because docs/planner.js has no YAML parser and must
+    # still be gated against this golden. If the two drift, the browser parity
+    # test silently starts checking a different cluster.
+    pytest.importorskip("yaml")
+    assert golden_check.plan_text(REPO / "examples" / "cluster_4x3090_2nodes_10gbe.yaml") == \
+        golden_check.plan_text(REPO / "examples" / "cluster_4x3090_2nodes_10gbe.json")
+
 def test_infeasible_model_rejected(tmp_path):
     manifest = json.loads((REPO / "examples" / "cluster_4x3090_singlebox.json").read_text())
     manifest["model"]["dtype"] = "fp32"  # 70B fp32 cannot fit 4x24GB

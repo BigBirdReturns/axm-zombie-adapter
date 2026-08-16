@@ -4,7 +4,10 @@
     "name": "llama-3-70b",
     "dtype": "q4",
     "kv_cache": "fp16",
-    "estimated_model_gb": 32.6
+    "estimated_model_gb": 32.6,
+    "model_size_bytes": 35000000000,
+    "model_size_source": "legacy_name_heuristic",
+    "model_object_sha256": null
   },
   "cluster": {
     "name": "zombie-singlebox",

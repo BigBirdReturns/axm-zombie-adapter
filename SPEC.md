@@ -67,9 +67,51 @@ Each link:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `name` | string | yes | Model identifier; used for coarse size estimation |
+| `name` | string | yes | Model identifier; used for coarse size estimation when no size is declared |
 | `dtype` | string | yes | Weight precision: `fp32`, `fp16`, `bf16`, `fp8`, `int8`, `q8`, `int4`, `q4` |
 | `kv_cache` | string | no (default: `dtype`) | KV-cache precision |
+| `params` | integer | no | Total parameter count. For a mixture-of-experts model this is the **total**, not per-expert |
+| `bytes` | integer | no | Exact on-disk weight size in bytes. Highest precedence |
+| `sha256` | string | no (default null) | Content identity of the measured model object, echoed into the plan as `model_object_sha256`. Declaring it is what lets a reader tell a measured object from an unverified declaration |
+
+`bytes` and `params` must each be a **finite, positive, whole number** when
+present. A reader must refuse zero, negative, fractional, non-finite, boolean,
+and non-numeric declarations rather than coerce them. This is not pedantry: a
+zero or negative size satisfies every feasibility comparison, so it does not
+merely mis-size a plan, it authorizes any placement at all.
+
+**Presence and value are separate facts.** An *absent* `bytes` or `params` key
+means no size was declared at that level and the reader falls through to the
+next source. A *present* key whose value is `null` is a size declaration that
+is not a size, and a reader must **refuse** it — it must not be treated as
+absent. Conflating the two lets an explicitly empty declaration fall through to
+the name heuristic, so a manifest that declared its size is authorized by a
+guess and the plan reports `legacy_name_heuristic` as though the field had
+never been written. (`sha256` is the deliberate exception: absent and `null`
+both mean "no identity was declared" and both emit `model_object_sha256:
+null`, so neither can be mistaken for a measurement.)
+
+**Declared sizes must be exactly representable by every conforming reader.**
+`bytes` and `params` must lie within ±(2⁵³−1) = ±9007199254740991. A reader
+must refuse a larger magnitude rather than round it. Plans are exchanged as
+JSON and read by implementations whose only numeric type is an IEEE-754
+double — `9007199254740993` is read back as `9007199254740992` — and a rounded
+byte count published as `model_size_bytes` is a number nobody asserted
+standing as the size that authorized a placement. Refusing is the only option
+that keeps the two readable as the same fact.
+
+`sha256`, when present, must be exactly 64 hexadecimal characters. A reader
+must refuse anything else rather than emit it as `model_object_sha256`, since
+an identity that cannot be checked is not an identity.
+
+Size precedence is `bytes`, then `params` × bytes-per-parameter, then inference
+from `name`. A declared size always wins over the name.
+
+If **both** `bytes` and `params` are declared and they imply sizes differing by
+a factor of 10 or more, a reader must **refuse** rather than apply precedence.
+Quantization and packaging move on-disk size by small factors, so smaller
+disagreements are tolerated; an order of magnitude means one field is stale, and
+silently preferring `bytes` would emit a confident plan built on a stale claim.
 
 ### `policy`
 
@@ -95,7 +137,7 @@ A plan is a JSON object. Version 1 keys:
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | integer | `1` |
-| `model` | object | `name`, `dtype`, `kv_cache` echoed from manifest; `estimated_model_gb` (number) added by the planner |
+| `model` | object | `name`, `dtype`, `kv_cache` echoed from manifest; `estimated_model_gb` (number), `model_size_bytes` (integer), `model_size_source` (string), `model_object_sha256` (string or null) added by the planner |
 | `cluster` | object | `name`; `nodes`: sorted list of node ids; `gpus`: flattened list of GPU records (`node`, `host`, `gpu` [the index], `name`, `vram_gb`, `mem_bw_gbps`) |
 | `policy` | object | The manifest policy after defaulting, echoed verbatim |
 | `pipeline_stages` | list | Ordered stages; each `{stage: int, placement: [{node: string, gpu: int}]}` |
@@ -114,12 +156,77 @@ A plan is a JSON object. Version 1 keys:
   what makes plans diffable across decades and golden-testable in CI.
 - Plans are **disposable**: losing a GPU means editing the manifest and
   re-planning, never hand-editing the plan.
+- `estimated_model_gb` is `model_size_bytes ÷ 1073741824` rounded to two
+  decimals, **half away from zero**, and the rounding is defined on the exact
+  value rather than on any host's floating-point `round`. Host defaults
+  disagree at a tie — Python's `round` is half-to-even and JavaScript's
+  `Math.round` is half-up, so 1207959552 B is 1.12 GB in one and 1.13 GB in
+  the other — and determinism is a property of the format, not of the writer.
+  The exact form is: multiply the byte count by 100, divide by 1073741824 with
+  remainder, and increment the quotient when twice the remainder is at least
+  the divisor. `model_size_bytes` remains the authoritative size;
+  `estimated_model_gb` is the rounded presentation of it.
+- A plan discloses **how the size that authorized its placement was obtained**.
+  `model_size_source` is one of `manifest_bytes`,
+  `manifest_params_and_quantization`, or `legacy_name_heuristic`, and
+  `model_size_bytes` is the exact value used before rounding to
+  `estimated_model_gb`. A plan sized by `legacy_name_heuristic` remains useful
+  for compatibility and previews, but it must not be read as carrying the same
+  evidence status as a measured model object. `model_object_sha256` is null
+  unless the manifest declared the identity of the object that was measured; a
+  declared `bytes` with no `sha256` is an unverified claim, not a measurement.
 
 ## Reference model-size estimation (informative, not normative)
 
-The v1 reference planner estimates parameter count from the model name
-(`70b`, `34b`, `13b`, `7b` substrings; otherwise 30B) and multiplies by
-bytes-per-parameter for `dtype` (4 for fp32; 2 for fp16/bf16 and unknown
-dtypes; 1 for fp8/int8/q8; 0.5 for int4/q4). Feasibility requires usable VRAM
-(total minus per-GPU reserve) ≥ 1.05 × estimated model size. Future planners
-may estimate differently; the manifest and plan schemas do not change for it.
+The v1 reference planner resolves model size in this order, recording the
+matching `model_size_source` in the plan:
+
+1. `model.bytes`, used exactly (`manifest_bytes`);
+2. `model.params` × bytes-per-parameter for `dtype`
+   (`manifest_params_and_quantization`);
+3. inference from `model.name` via the `7b`, `13b`, `34b`, `70b` parameter
+   tokens (`legacy_name_heuristic`).
+
+A parameter token is a **complete** number followed by `b`, delimited so that
+it is neither preceded by a digit or decimal point nor followed by another
+letter or digit. `model-170b` therefore does not match `70b`, and `model-107b`
+does not match `7b`; both refuse. A name carrying a token outside the supported
+set, or carrying more than one distinct token, also refuses — the planner does
+not round a name to the nearest size it happens to know. Because tokens are
+matched whole, match ordering no longer affects the result.
+
+Bytes-per-parameter is 4 for fp32; 2 for fp16/bf16 and unknown dtypes; 1 for
+fp8/int8/q8; 0.5 for int4/q4. Feasibility requires usable VRAM (total minus
+per-GPU reserve) ≥ 1.05 × model size.
+
+If none of the three resolve, the planner **raises rather than assuming a
+default**. It also refuses a name carrying a mixture-of-experts multiplier
+(`8x7b`, `4x22b`), because a bare parameter substring understates such a model
+by roughly its expert count. Both refusals name the model and ask for `params`
+or `bytes`.
+
+The multiplier and the parameter token must be delimited by **the same law**.
+Both end at any character that is not a letter or digit — `_` included. A
+reader that ends the multiplier at a word boundary in the regex-`\b` sense (in
+which `_` is a word character) but ends the parameter token at a
+letter-or-digit boundary makes `mixtral-8x7b_model` a mixture for the refusal
+and a plain 7B model for the heuristic. The heuristic wins that disagreement,
+and the result is a 13 GB estimate for a ~46.7B mixture, placed. Where one
+pattern sees a boundary the other must see one too.
+
+This refusal is deliberate. A wrong size estimate is not surfaced as an error;
+it is surfaced as a confident placement plan that is byte-identical in shape to
+a correct one and OOMs on contact with real hardware. Earlier versions defaulted
+to 30B, which silently produced such plans — a 1.42 TiB model estimated at
+27.94 GB and placed across four 24 GB GPUs.
+
+The same reasoning applies to two contradictory declarations. When `bytes` and
+`params` disagree by an order of magnitude the planner refuses instead of
+applying precedence, because a stale `bytes` beside honest `params` recreates
+the identical false plan through a different input channel. The refusal names
+both claims and the size each implies. Refusals that reach the feasibility check
+also name the resolved size and its source, so an operator can see whether the
+number that refused the placement was measured or guessed.
+
+Future planners may estimate differently; the manifest and plan schemas do not
+change for it.

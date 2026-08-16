@@ -25,3 +25,25 @@ jobs:
         run: |
           pip install -e '.[yaml]'
           python -m pytest tests/ -q
+
+  browser:
+    # docs/planner.js is the second writer of the plan artifact and is
+    # published by the pages workflow. The Python matrix above cannot load it,
+    # so without this job the public planner ships ungated -- which is how it
+    # kept a silent 30e9 default and a bare "7b" substring match long after
+    # the reference implementation had refused both.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Browser planner parity (module loads, plans match goldens, refusals hold)
+        run: node tests/browser_parity.js
+      - name: Two-writer conformance (Python and browser decide identically)
+        run: |
+          pip install -e '.[yaml]' pytest
+          python -m pytest tests/test_writer_conformance.py -q
