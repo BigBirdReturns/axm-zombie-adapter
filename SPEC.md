@@ -80,6 +80,26 @@ and non-numeric declarations rather than coerce them. This is not pedantry: a
 zero or negative size satisfies every feasibility comparison, so it does not
 merely mis-size a plan, it authorizes any placement at all.
 
+**Presence and value are separate facts.** An *absent* `bytes` or `params` key
+means no size was declared at that level and the reader falls through to the
+next source. A *present* key whose value is `null` is a size declaration that
+is not a size, and a reader must **refuse** it — it must not be treated as
+absent. Conflating the two lets an explicitly empty declaration fall through to
+the name heuristic, so a manifest that declared its size is authorized by a
+guess and the plan reports `legacy_name_heuristic` as though the field had
+never been written. (`sha256` is the deliberate exception: absent and `null`
+both mean "no identity was declared" and both emit `model_object_sha256:
+null`, so neither can be mistaken for a measurement.)
+
+**Declared sizes must be exactly representable by every conforming reader.**
+`bytes` and `params` must lie within ±(2⁵³−1) = ±9007199254740991. A reader
+must refuse a larger magnitude rather than round it. Plans are exchanged as
+JSON and read by implementations whose only numeric type is an IEEE-754
+double — `9007199254740993` is read back as `9007199254740992` — and a rounded
+byte count published as `model_size_bytes` is a number nobody asserted
+standing as the size that authorized a placement. Refusing is the only option
+that keeps the two readable as the same fact.
+
 `sha256`, when present, must be exactly 64 hexadecimal characters. A reader
 must refuse anything else rather than emit it as `model_object_sha256`, since
 an identity that cannot be checked is not an identity.
@@ -136,6 +156,16 @@ A plan is a JSON object. Version 1 keys:
   what makes plans diffable across decades and golden-testable in CI.
 - Plans are **disposable**: losing a GPU means editing the manifest and
   re-planning, never hand-editing the plan.
+- `estimated_model_gb` is `model_size_bytes ÷ 1073741824` rounded to two
+  decimals, **half away from zero**, and the rounding is defined on the exact
+  value rather than on any host's floating-point `round`. Host defaults
+  disagree at a tie — Python's `round` is half-to-even and JavaScript's
+  `Math.round` is half-up, so 1207959552 B is 1.12 GB in one and 1.13 GB in
+  the other — and determinism is a property of the format, not of the writer.
+  The exact form is: multiply the byte count by 100, divide by 1073741824 with
+  remainder, and increment the quotient when twice the remainder is at least
+  the divisor. `model_size_bytes` remains the authoritative size;
+  `estimated_model_gb` is the rounded presentation of it.
 - A plan discloses **how the size that authorized its placement was obtained**.
   `model_size_source` is one of `manifest_bytes`,
   `manifest_params_and_quantization`, or `legacy_name_heuristic`, and
@@ -174,6 +204,15 @@ default**. It also refuses a name carrying a mixture-of-experts multiplier
 (`8x7b`, `4x22b`), because a bare parameter substring understates such a model
 by roughly its expert count. Both refusals name the model and ask for `params`
 or `bytes`.
+
+The multiplier and the parameter token must be delimited by **the same law**.
+Both end at any character that is not a letter or digit — `_` included. A
+reader that ends the multiplier at a word boundary in the regex-`\b` sense (in
+which `_` is a word character) but ends the parameter token at a
+letter-or-digit boundary makes `mixtral-8x7b_model` a mixture for the refusal
+and a plain 7B model for the heuristic. The heuristic wins that disagreement,
+and the result is a 13 GB estimate for a ~46.7B mixture, placed. Where one
+pattern sees a boundary the other must see one too.
 
 This refusal is deliberate. A wrong size estimate is not surfaced as an error;
 it is surfaced as a confident placement plan that is byte-identical in shape to

@@ -3,6 +3,11 @@ from typing import Any, Dict, List
 import math
 import re
 
+# Distinguishes "the manifest did not declare this field" from "the manifest
+# declared it as null". `None` cannot carry that distinction, and the two mean
+# opposite things for a size claim.
+_ABSENT = object()
+
 _BYTES_PER_PARAM = {
     "fp32": 4.0,
     "fp16": 2.0,
@@ -34,7 +39,28 @@ _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 
 # "8x7b", "4 x 22b": a mixture-of-experts multiplier makes a bare parameter
 # substring a lie. mixtral-8x7b is ~46.7B, not 7B.
-_MOE_MULTIPLIER = re.compile(r"\d+\s*x\s*\d+\s*b\b")
+#
+# The trailing delimiter is the same law _PARAM_TOKEN uses, and it has to be:
+# `\b` treats "_" as a word character, so "mixtral-8x7b_model" ended the MoE
+# match at a non-boundary and escaped this check -- while _PARAM_TOKEN's
+# `(?![a-z0-9])` happily accepted the same "_" and read the name as a 7B model.
+# One delimiter law for both patterns is what keeps a name from being MoE for
+# the refusal and plain for the heuristic. The leading side is deliberately
+# left unanchored: this pattern only ever refuses, so matching more of the
+# string than _PARAM_TOKEN can is fail-closed.
+_MOE_MULTIPLIER = re.compile(r"\d+\s*x\s*\d+\s*b(?![a-z0-9])")
+
+# Sizes are exchanged as JSON numbers and read by a JavaScript writer whose
+# only numeric type is a double. Above 2**53-1 a byte count no longer survives
+# that round trip -- 9007199254740993 is read back as 9007199254740992 -- so a
+# declaration beyond this magnitude is refused by both writers rather than
+# silently rounded and then published as the size that authorized a placement.
+MAX_EXACT_INTEGER = 2**53 - 1
+
+# One gibibyte. `estimated_model_gb` is derived from this by exact integer
+# arithmetic (see _estimated_gb) rather than by float rounding, because the two
+# writers' native round() disagree at a decimal tie.
+_GIB = 1024**3
 
 # How the size that authorized a placement was obtained. A plan carries this so
 # a declared measurement and a name guess are never read as the same evidence.
@@ -52,6 +78,24 @@ SIZE_CONFLICT_FACTOR = 10.0
 
 def _bytes_per_param(dtype: str) -> float:
     return _BYTES_PER_PARAM.get(str(dtype).lower(), 2.0)
+
+
+def _estimated_gb(model_bytes: int) -> float:
+    """Bytes -> GiB at two decimals under one explicit rounding law.
+
+    Half-way values round up (away from zero). This is spelled out in exact
+    integer arithmetic instead of `round(bytes / 1024**3, 2)` because the two
+    plan writers disagree about what `round` means at a tie: Python rounds
+    half to even and gives 1.12 for 1207959552 B, while JavaScript's
+    Math.round rounds half up and gives 1.13. Neither is wrong; having two of
+    them is. `scaled` is the exact numerator, so the comparison
+    `2 * remainder >= _GIB` is the tie test with no floating point in it.
+    """
+    scaled = model_bytes * 100
+    whole, remainder = divmod(scaled, _GIB)
+    if 2 * remainder >= _GIB:
+        whole += 1
+    return whole / 100
 
 
 def _validated_size_field(value: Any, field: str, name: str) -> int:
@@ -81,6 +125,14 @@ def _validated_size_field(value: Any, field: str, name: str) -> int:
                 f"got {value!r}."
             )
     resolved = int(value)
+    if abs(resolved) > MAX_EXACT_INTEGER:
+        raise ValueError(
+            f"model.{field} for {name!r} must lie within the exact integer "
+            f"range of +/-{MAX_EXACT_INTEGER} {unit}, got {resolved}. Beyond "
+            "that magnitude the value cannot be represented exactly by both "
+            "plan writers, and rounding an asserted size would publish a "
+            "number nobody asserted as the size that authorized a placement."
+        )
     if resolved <= 0:
         raise ValueError(
             f"model.{field} for {name!r} must be greater than zero, got "
@@ -136,18 +188,24 @@ def _resolve_model_size(model: Dict[str, Any]) -> tuple[int, str]:
     dtype = model.get("dtype", "")
     name = str(model.get("name", ""))
 
-    declared_bytes = model.get("bytes")
-    declared_params = model.get("params")
+    # Presence and value are separate facts. An absent `bytes` key means "no
+    # size was declared, fall through to params or the name"; a present
+    # `bytes: null` means "a size was declared and it is nothing", which is not
+    # a size. Reading both as None let an explicitly empty declaration fall
+    # through to the name heuristic, so a manifest that declared its size ended
+    # up authorized by a guess -- and said so in `model_size_source`.
+    declared_bytes = model["bytes"] if "bytes" in model else _ABSENT
+    declared_params = model["params"] if "params" in model else _ABSENT
 
-    if declared_bytes is not None:
+    if declared_bytes is not _ABSENT:
         size = _validated_size_field(declared_bytes, "bytes", name)
-        if declared_params is not None:
+        if declared_params is not _ABSENT:
             params = _validated_size_field(declared_params, "params", name)
             implied = int(params * _bytes_per_param(dtype))
             _refuse_contradictory_size_claims(name, size, params, implied, dtype)
         return size, SIZE_SOURCE_MANIFEST_BYTES
 
-    if declared_params is not None:
+    if declared_params is not _ABSENT:
         params = _validated_size_field(declared_params, "params", name)
         return (
             int(params * _bytes_per_param(dtype)),
@@ -231,7 +289,7 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
     total_vram = sum(g["vram_gb"] for g in gpus)
     model_bytes, size_source = _resolve_model_size(model)
     model_sha256 = _validated_sha256(model.get("sha256"), model["name"])
-    model_gb = model_bytes / (1024**3)
+    model_gb = model_bytes / _GIB
 
     reserve_gb_per_gpu = float(policy.get("reserve_gb_per_gpu", 4.0))
     usable_vram = max(0.0, total_vram - reserve_gb_per_gpu * len(gpus))
@@ -277,7 +335,7 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
             "name": model["name"],
             "dtype": model["dtype"],
             "kv_cache": model.get("kv_cache", model["dtype"]),
-            "estimated_model_gb": round(model_gb, 2),
+            "estimated_model_gb": _estimated_gb(model_bytes),
             "model_size_bytes": model_bytes,
             "model_size_source": size_source,
             "model_object_sha256": model_sha256,

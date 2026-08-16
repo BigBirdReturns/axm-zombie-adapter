@@ -25,6 +25,7 @@ const MARKERS = [
   "mixture-of-experts",
   "Unknown model size",
   "cannot resolve",
+  "exact integer range",
   "model.bytes",
   "model.params",
   "model.sha256",
@@ -55,12 +56,10 @@ const out = {};
 for (const c of cases) {
   try {
     const plan = planner.buildPlan(planner.normalizeManifest(manifestFor(c.model)));
-    out[c.id] = {
-      kind: "plan",
-      gb: plan.model.estimated_model_gb,
-      source: plan.model.model_size_source,
-      sha: plan.model.model_object_sha256,
-    };
+    // The complete model object, not a projection of it. A selected view left
+    // model_size_bytes -- the number the placement was authorized against --
+    // outside the comparison entirely.
+    out[c.id] = { kind: "plan", model: plan.model };
   } catch (e) {
     out[c.id] = { kind: "refuse", markers: MARKERS.filter((m) => e.message.includes(m)).sort() };
   }

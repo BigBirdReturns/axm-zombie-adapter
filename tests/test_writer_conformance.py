@@ -30,6 +30,7 @@ MARKERS = [
     "mixture-of-experts",
     "Unknown model size",
     "cannot resolve",
+    "exact integer range",
     "model.bytes",
     "model.params",
     "model.sha256",
@@ -58,16 +59,19 @@ def manifest_for(model):
 
 
 def python_outcome(model):
+    """The complete emitted model object, or the refusal that replaced it.
+
+    Deliberately not a projection. Selecting `gb`, `source`, and `sha` left
+    `model_size_bytes` -- the exact number the placement was authorized
+    against -- outside the comparison, so the two writers could publish
+    different byte counts and still agree on every field this table checked.
+    Whatever the schema says the model object contains is what gets compared.
+    """
     try:
         plan = build_plan(manifest_for(model))
     except ValueError as e:
         return {"kind": "refuse", "markers": sorted(m for m in MARKERS if m in str(e))}
-    return {
-        "kind": "plan",
-        "gb": plan["model"]["estimated_model_gb"],
-        "source": plan["model"]["model_size_source"],
-        "sha": plan["model"]["model_object_sha256"],
-    }
+    return {"kind": "plan", "model": plan["model"]}
 
 
 @pytest.fixture(scope="module")
@@ -84,9 +88,31 @@ def browser_outcomes():
     return json.loads(proc.stdout)
 
 
+# Every key SPEC.md v1 says the plan's model object carries. Pinned here so a
+# new field cannot be added to the writers and quietly stay outside the
+# comparison; the point of this table is that nothing in the model object is
+# exempt from it.
+MODEL_OBJECT_KEYS = {
+    "name",
+    "dtype",
+    "kv_cache",
+    "estimated_model_gb",
+    "model_size_bytes",
+    "model_size_source",
+    "model_object_sha256",
+}
+
+
 @pytest.mark.parametrize("case", CASES, ids=[c["id"] for c in CASES])
 def test_both_writers_agree(case, browser_outcomes):
     assert case["id"] in browser_outcomes, "browser writer produced no outcome for this case"
-    assert python_outcome(case["model"]) == browser_outcomes[case["id"]], (
+    outcome = python_outcome(case["model"])
+    if outcome["kind"] == "plan":
+        assert set(outcome["model"]) == MODEL_OBJECT_KEYS, (
+            "the plan's model object gained or lost a field; update "
+            "MODEL_OBJECT_KEYS and SPEC.md deliberately, and keep the new "
+            "field inside the two-writer comparison"
+        )
+    assert outcome == browser_outcomes[case["id"]], (
         f"the two plan writers disagree about {case['id']}"
     )

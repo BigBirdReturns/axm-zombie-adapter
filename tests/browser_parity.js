@@ -124,6 +124,24 @@ refuses(
   "manifest_bytes"
 );
 refuses("mixtral-8x7b refuses as unsupported MoE", { name: "mixtral-8x7b", dtype: "fp16" }, "mixture-of-experts");
+// `\b` counts "_" as a word character, so the MoE pattern used to stop
+// matching at "8x7b_" while the parameter-token pattern happily read the same
+// name as a 7B model -- 13 GB for a ~46.7B mixture, and a plan to place it.
+refuses(
+  "mixtral-8x7b_model refuses as MoE despite the underscore",
+  { name: "mixtral-8x7b_model", dtype: "fp16" },
+  "mixture-of-experts"
+);
+refuses(
+  "mixtral_8x7b_instruct refuses as MoE",
+  { name: "mixtral_8x7b_instruct", dtype: "fp16" },
+  "mixture-of-experts"
+);
+refuses(
+  "a spaced multiplier before an underscore refuses as MoE",
+  { name: "moe 4 x 22 b_v2", dtype: "fp16" },
+  "mixture-of-experts"
+);
 refuses("an unknown model with no size fields refuses", { name: "Kimi-K3", dtype: "fp8" }, "Unknown model size");
 refuses(
   "contradictory bytes and params refuse",
@@ -151,8 +169,64 @@ for (const [label, value] of [
 }
 
 check("an excessively large size refuses rather than authorizing a placement", () => {
+  // 1e30 is an integer-valued double but not an exact integer, so it refuses
+  // as unrepresentable before it can reach the feasibility check.
   const message = refusal({ name: "some-model", dtype: "fp8", bytes: 1e30 });
+  assert.ok(message !== null && message.includes("exact integer range"), `got: ${message}`);
+});
+
+// A JSON byte count above 2**53-1 does not survive being read as a double.
+// 9007199254740993 parses to 9007199254740992 here, so publishing it would
+// mean publishing a number the manifest never asserted as the size that
+// authorized the placement.
+console.log("exact integer authority");
+check("the lossy parse this guards against is real", () => {
+  assert.strictEqual(JSON.parse("9007199254740993"), 9007199254740992);
+});
+refuses(
+  "model.bytes above the exact integer range refuses instead of rounding",
+  { name: "some-model", dtype: "fp8", bytes: 9007199254740993 },
+  "exact integer range"
+);
+refuses(
+  "model.params above the exact integer range refuses instead of rounding",
+  { name: "some-model", dtype: "fp8", params: 9007199254740993 },
+  "exact integer range"
+);
+check("the largest exactly representable byte count is still read as a size", () => {
+  const message = refusal({ name: "some-model", dtype: "fp8", bytes: Number.MAX_SAFE_INTEGER });
   assert.ok(message !== null && message.includes("Insufficient VRAM"), `got: ${message}`);
+});
+
+// Presence and value are separate facts: an absent size field falls through to
+// the name heuristic, a declared-null one is a size claim that is not a size.
+console.log("declared-null size fields");
+refuses(
+  "model.bytes declared null refuses rather than falling through to the name",
+  { name: "llama-3-70b", dtype: "q4", bytes: null },
+  "model.bytes"
+);
+refuses(
+  "model.params declared null refuses rather than falling through to the name",
+  { name: "llama-3-70b", dtype: "q4", params: null },
+  "model.params"
+);
+check("the same name with the field absent still plans", () => {
+  const plan = planner.buildPlan(planner.normalizeManifest(manifest({ name: "llama-3-70b", dtype: "q4" })));
+  assert.strictEqual(plan.model.model_size_source, "legacy_name_heuristic");
+});
+
+// One rounding law, spelled out in exact integer arithmetic. Math.round(gb *
+// 100) / 100 gives 1.13 for a decimal tie where Python's round() gives 1.12.
+console.log("decimal rounding law");
+check("a decimal tie rounds half away from zero (1207959552 B -> 1.13 GB)", () => {
+  const plan = planner.buildPlan(planner.normalizeManifest(manifest({ name: "m", dtype: "fp8", bytes: 1207959552 })));
+  assert.strictEqual(plan.model.estimated_model_gb, 1.13);
+  assert.strictEqual(plan.model.model_size_bytes, 1207959552);
+});
+check("one byte below the tie rounds down (1207959551 B -> 1.12 GB)", () => {
+  const plan = planner.buildPlan(planner.normalizeManifest(manifest({ name: "m", dtype: "fp8", bytes: 1207959551 })));
+  assert.strictEqual(plan.model.estimated_model_gb, 1.12);
 });
 
 console.log("model object identity");

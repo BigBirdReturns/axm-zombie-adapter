@@ -79,7 +79,34 @@
 
   // "8x7b", "4 x 22b": a mixture-of-experts multiplier makes a bare parameter
   // substring a lie. mixtral-8x7b is ~46.7B, not 7B.
-  const MOE_MULTIPLIER = /\d+\s*x\s*\d+\s*b\b/;
+  //
+  // The trailing delimiter is the same law PARAM_TOKEN uses. `\b` treats "_"
+  // as a word character, so "mixtral-8x7b_model" escaped this check while
+  // PARAM_TOKEN's `(?![a-z0-9])` accepted the same "_" and read the name as a
+  // 7B model. The leading side is deliberately left unanchored: this pattern
+  // only ever refuses, so matching more than PARAM_TOKEN can is fail-closed.
+  const MOE_MULTIPLIER = /\d+\s*x\s*\d+\s*b(?![a-z0-9])/;
+
+  // A byte count is exchanged as a JSON number and read here as a double.
+  // Above 2**53-1 that read is lossy -- 9007199254740993 parses to
+  // 9007199254740992 -- so both writers refuse beyond this magnitude rather
+  // than publish a rounded number as the size that authorized a placement.
+  const MAX_EXACT_INTEGER = Number.MAX_SAFE_INTEGER; // 9007199254740991
+
+  // One gibibyte, as a BigInt, for the exact rounding law in estimatedGb().
+  const GIB = 1073741824n;
+
+  // Bytes -> GiB at two decimals, half away from zero, in exact integer
+  // arithmetic. Mirrors planner.py's _estimated_gb. `Math.round(gb * 100) /
+  // 100` and Python's `round(gb, 2)` disagree at a decimal tie -- 1207959552 B
+  // is 1.13 here and 1.12 there -- so neither writer's native rounding is used.
+  function estimatedGb(modelBytes) {
+    const scaled = BigInt(modelBytes) * 100n;
+    let whole = scaled / GIB;
+    const remainder = scaled % GIB;
+    if (2n * remainder >= GIB) whole += 1n;
+    return Number(whole) / 100;
+  }
 
   function bytesPerParam(dtype) {
     const table = { fp32: 4.0, fp16: 2.0, bf16: 2.0, fp8: 1.0, int8: 1.0, q8: 1.0, int4: 0.5, q4: 0.5 };
@@ -108,6 +135,15 @@
     if (!Number.isInteger(value)) {
       throw new Error(
         `model.${field} for '${name}' must be a whole number of ${unit}, got ${value}.`
+      );
+    }
+    if (Math.abs(value) > MAX_EXACT_INTEGER) {
+      throw new Error(
+        `model.${field} for '${name}' must lie within the exact integer range ` +
+        `of +/-${MAX_EXACT_INTEGER} ${unit}, got ${value}. Beyond that ` +
+        "magnitude the value cannot be represented exactly by both plan " +
+        "writers, and rounding an asserted size would publish a number " +
+        "nobody asserted as the size that authorized a placement."
       );
     }
     if (value <= 0) {
@@ -157,21 +193,26 @@
   function resolveModelSize(model) {
     const name = String(model.name);
     const dtype = model.dtype;
-    const declaredBytes = model.bytes !== undefined && model.bytes !== null ? model.bytes : null;
-    const declaredParams = model.params !== undefined && model.params !== null ? model.params : null;
+    // Presence and value are separate facts, exactly as in planner.py. An
+    // absent `bytes` key means "no size declared, fall through"; a present
+    // `bytes: null` means "a size was declared and it is nothing", which is
+    // not a size. Treating the two alike let an explicitly empty declaration
+    // fall through to the name heuristic and be published as a guess.
+    const declaredBytes = Object.prototype.hasOwnProperty.call(model, "bytes");
+    const declaredParams = Object.prototype.hasOwnProperty.call(model, "params");
 
-    if (declaredBytes !== null) {
-      const size = validatedSizeField(declaredBytes, "bytes", name);
-      if (declaredParams !== null) {
-        const params = validatedSizeField(declaredParams, "params", name);
+    if (declaredBytes) {
+      const size = validatedSizeField(model.bytes, "bytes", name);
+      if (declaredParams) {
+        const params = validatedSizeField(model.params, "params", name);
         const implied = Math.trunc(params * bytesPerParam(dtype));
         refuseContradictorySizeClaims(name, size, params, implied, dtype);
       }
       return { bytes: size, source: SIZE_SOURCE_MANIFEST_BYTES };
     }
 
-    if (declaredParams !== null) {
-      const params = validatedSizeField(declaredParams, "params", name);
+    if (declaredParams) {
+      const params = validatedSizeField(model.params, "params", name);
       return {
         bytes: Math.trunc(params * bytesPerParam(dtype)),
         source: SIZE_SOURCE_MANIFEST_PARAMS,
@@ -320,7 +361,7 @@
         name: model.name,
         dtype: model.dtype,
         kv_cache: model.kv_cache !== undefined ? model.kv_cache : model.dtype,
-        estimated_model_gb: Math.round(modelGb * 100) / 100,
+        estimated_model_gb: estimatedGb(modelBytes),
         model_size_bytes: modelBytes,
         model_size_source: resolved.source,
         model_object_sha256: modelSha256,

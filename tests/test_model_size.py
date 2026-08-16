@@ -5,6 +5,7 @@ estimate is not returned as an error -- it is returned as a confident placement
 plan that OOMs on contact with real hardware. These tests pin the boundary
 between "known" and "refused".
 """
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -70,6 +71,24 @@ class GuessesAreRefused(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             build_plan(manifest({"name": "mixtral-8x7b", "dtype": "fp16"}))
         self.assertIn("mixture-of-experts", str(caught.exception))
+
+    def test_an_underscore_does_not_end_the_moe_multiplier(self):
+        """The two patterns must agree about where a token ends.
+
+        `\\b` counts "_" as a word character, so the MoE pattern stopped
+        matching at "8x7b_" -- while the parameter-token pattern's
+        `(?![a-z0-9])` accepted that same "_" and read the name as a 7B model.
+        One name was therefore MoE for the refusal and plain for the heuristic,
+        and the heuristic won: 13 GB for a ~46.7B mixture, placed on four
+        3090s. Any delimiter one pattern treats as a boundary the other must
+        too.
+        """
+        for name in ("mixtral-8x7b_model", "mixtral_8x7b_instruct",
+                     "moe 4 x 22 b_v2", "mixtral-8x7b.safetensors"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError) as caught:
+                    build_plan(manifest({"name": name, "dtype": "fp16"}))
+                self.assertIn("mixture-of-experts", str(caught.exception))
 
 
 class SizeProvenanceIsDisclosed(unittest.TestCase):
@@ -185,7 +204,109 @@ class ImpossibleSizeDeclarationsAreRefused(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             build_plan(manifest({"name": "some-model", "dtype": "fp8",
                                  "bytes": 10**30}))
+        self.assertIn("exact integer range", str(caught.exception))
+
+
+class DeclaredNullIsNotAnAbsentField(unittest.TestCase):
+    """Field presence and field value are two different facts.
+
+    An absent `bytes` key means "no size was declared here, fall through to
+    params or the name". A present `bytes: null` means "a size was declared and
+    it is nothing", which is not a size. Reading both as None let an explicitly
+    empty declaration fall through to the name heuristic, so a manifest that
+    declared its size was authorized by a guess -- and the plan reported
+    `legacy_name_heuristic` as if the field had never been written.
+    """
+
+    def test_declared_null_bytes_are_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "llama-3-70b", "dtype": "q4",
+                                 "bytes": None}))
+        self.assertIn("model.bytes", str(caught.exception))
+
+    def test_declared_null_params_are_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "llama-3-70b", "dtype": "q4",
+                                 "params": None}))
+        self.assertIn("model.params", str(caught.exception))
+
+    def test_declared_null_bytes_do_not_fall_through_to_params(self):
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "llama-3-70b", "dtype": "q4",
+                                 "bytes": None, "params": 7_000_000_000}))
+        self.assertIn("model.bytes", str(caught.exception))
+
+    def test_the_same_name_with_the_field_absent_still_plans(self):
+        plan = build_plan(manifest({"name": "llama-3-70b", "dtype": "q4"}))
+        self.assertEqual(plan["model"]["model_size_source"], "legacy_name_heuristic")
+
+
+class SizesMustSurviveBothWriters(unittest.TestCase):
+    """A byte count is exchanged as a JSON number and read as a double.
+
+    Above 2**53-1 that read is lossy: 9007199254740993 comes back as
+    9007199254740992. Publishing the rounded value would mean publishing a
+    number nobody asserted as the size that authorized a placement, so both
+    writers refuse the declaration instead.
+    """
+
+    UNSAFE = 9_007_199_254_740_993
+    LARGEST_EXACT = 9_007_199_254_740_991
+
+    def test_bytes_beyond_the_exact_integer_range_are_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "some-model", "dtype": "fp8",
+                                 "bytes": self.UNSAFE}))
+        self.assertIn("exact integer range", str(caught.exception))
+        self.assertIn("model.bytes", str(caught.exception))
+
+    def test_params_beyond_the_exact_integer_range_are_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "some-model", "dtype": "fp8",
+                                 "params": self.UNSAFE}))
+        self.assertIn("exact integer range", str(caught.exception))
+        self.assertIn("model.params", str(caught.exception))
+
+    def test_the_lossy_round_trip_this_guards_against_is_real(self):
+        # What the browser writer would have received for UNSAFE.
+        self.assertEqual(
+            json.loads(str(self.UNSAFE), parse_int=float), float(self.LARGEST_EXACT + 1))
+
+    def test_the_largest_exact_value_is_still_read_as_a_size(self):
+        # Refused for the honest reason -- 8 PB does not fit four 3090s -- not
+        # because the value could not be represented.
+        with self.assertRaises(ValueError) as caught:
+            build_plan(manifest({"name": "some-model", "dtype": "fp8",
+                                 "bytes": self.LARGEST_EXACT}))
         self.assertIn("Insufficient VRAM", str(caught.exception))
+
+
+class OneDecimalRoundingLaw(unittest.TestCase):
+    """`estimated_model_gb` must not depend on which writer produced it.
+
+    Python's round() rounds half to even and JavaScript's Math.round() rounds
+    half up, so a decimal tie published 1.12 from one writer and 1.13 from the
+    other for the same declared bytes. Both now round half away from zero, in
+    exact integer arithmetic, and the plan is a plan either way.
+    """
+
+    TIE_BYTES = 1_207_959_552          # exactly 1.125 GiB
+    JUST_UNDER_TIE_BYTES = 1_207_959_551
+
+    def test_a_decimal_tie_rounds_half_away_from_zero(self):
+        plan = build_plan(manifest({"name": "m", "dtype": "fp8",
+                                    "bytes": self.TIE_BYTES}))
+        self.assertEqual(plan["model"]["estimated_model_gb"], 1.13)
+        self.assertEqual(plan["model"]["model_size_bytes"], self.TIE_BYTES)
+
+    def test_one_byte_below_the_tie_rounds_down(self):
+        plan = build_plan(manifest({"name": "m", "dtype": "fp8",
+                                    "bytes": self.JUST_UNDER_TIE_BYTES}))
+        self.assertEqual(plan["model"]["estimated_model_gb"], 1.12)
+
+    def test_the_law_is_not_the_language_default(self):
+        # The regression this pins: the old expression, still evaluated here.
+        self.assertEqual(round(self.TIE_BYTES / 1024**3, 2), 1.12)
 
 
 class ModelObjectIdentityIsValidated(unittest.TestCase):
