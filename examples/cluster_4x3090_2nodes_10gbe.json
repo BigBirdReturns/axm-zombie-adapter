@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "_note": "JSON twin of cluster_4x3090_2nodes_10gbe.yaml. JSON is the canonical dependency-free form (SPEC.md rule 6), so the golden for this cluster can be regenerated without PyYAML. model.sha256 is the sha-256 of the ASCII string 'example-model-object:llama-3-70b-q4-2node', not a digest of real model weights.",
+  "cluster": {
+    "name": "zombie-2nodes",
+    "nodes": [
+      {
+        "id": "node-a",
+        "host": "192.168.1.10",
+        "runtimes": ["llamacpp"],
+        "gpus": [
+          {"index": 0, "name": "RTX_3090", "vram_gb": 24, "mem_bw_gbps": 936, "uuid": "GPU-11111111-1111-4111-8111-111111111111"},
+          {"index": 1, "name": "RTX_3090", "vram_gb": 24, "mem_bw_gbps": 936, "uuid": "GPU-22222222-2222-4222-8222-222222222222"}
+        ],
+        "links": [{"type": "ethernet", "to": "node-b", "gbps": 10}]
+      },
+      {
+        "id": "node-b",
+        "host": "192.168.1.11",
+        "runtimes": ["llamacpp"],
+        "gpus": [
+          {"index": 0, "name": "RTX_3090", "vram_gb": 24, "mem_bw_gbps": 936, "uuid": "GPU-33333333-3333-4333-8333-333333333333"},
+          {"index": 1, "name": "RTX_3090", "vram_gb": 24, "mem_bw_gbps": 936, "uuid": "GPU-44444444-4444-4444-8444-444444444444"}
+        ],
+        "links": [{"type": "ethernet", "to": "node-a", "gbps": 10}]
+      }
+    ]
+  },
+  "model": {
+    "name": "llama-3-70b",
+    "dtype": "q4",
+    "kv_cache": "fp16",
+    "bytes": 35000000000,
+    "sha256": "863a91e7b83b67c2781e40f95fa6416edf737f5e7908d0c4d6b321cfc0df3a3d",
+    "engines": ["llamacpp"],
+    "residence": [
+      {"node": "node-a", "verified": true, "sha256": "863a91e7b83b67c2781e40f95fa6416edf737f5e7908d0c4d6b321cfc0df3a3d", "path": "/srv/models/llama-3-70b-q4.gguf"},
+      {"node": "node-b", "verified": true, "sha256": "863a91e7b83b67c2781e40f95fa6416edf737f5e7908d0c4d6b321cfc0df3a3d", "path": "/srv/models/llama-3-70b-q4.gguf"}
+    ]
+  },
+  "policy": {
+    "target_tps": 18,
+    "max_latency_ms": 250,
+    "prefer_bandwidth": true,
+    "allow_cpu_offload": false,
+    "reserve_gb_per_gpu": 4.0
+  }
+}

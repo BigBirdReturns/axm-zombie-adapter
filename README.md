@@ -105,9 +105,39 @@ This is the resurrection test: no network, no third-party dependencies. It
 builds a plan from the JSON example, checks it is byte-identical to the
 committed golden file, and runs every exporter.
 
+## What authorizes a placement
+
+A plan is a claim that a model fits particular hardware, so it has to carry the
+evidence rather than the assertion.
+
+- **Exact size, or no plan.** `model.bytes` and `model.sha256` are required to
+  place. The planner does not infer a size from the model name, because a wrong
+  guess is not surfaced as an error — it is surfaced as a confident plan that
+  OOMs on contact with hardware.
+- **Seats are not boards.** A GPU entry describes a *seat*; `uuid` identifies
+  the *physical accelerator* in it. Two seats claiming one board are refused,
+  because their memory is not independent and summing it invents VRAM.
+- **Independent VRAM is never pooled.** Every weight byte is assigned to a named
+  device, and each stage is proved against its own devices. Memory on a node
+  that lacks the weights or lacks an engine is not capacity, whatever the
+  cluster total says. The arithmetic ships inside the plan as
+  `placement_proof`.
+- **Refusals are artifacts.** When a placement cannot be proved, the CLI writes
+  a typed refusal where the plan would have gone and exits `2`:
+
+```bash
+axm-zombie plan examples/estate_octo_w01_kimi_k3.json --out refusal.json
+# REFUSED [NO_SUPPORTED_ENGINE] ...
+```
+
+`artifacts/estate-octo-w01-kimi-k3.refusal.json` is a committed refusal for a
+real two-accelerator workstation asked to hold a 1453.7 GiB model.
+
 ## Model and cluster notes
 
-- The planner is heuristic on purpose. It stays conservative and it favors bandwidth locality.
+- The planner is heuristic in how it *shapes* stages. It is not heuristic about
+  whether they fit.
+- The planner stays conservative and it favors bandwidth locality.
 - For multi-node rigs, stage boundaries across nodes are expensive unless you have real interconnect (10GbE or better).
 - KV cache headroom matters. The planner reserves a fixed default per GPU, and you should tune it per model and batch.
 

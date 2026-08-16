@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "_note": "A REAL host, not a fixture. OCTO-W01 is the estate workstation; the two accelerator seats, their VRAM, PCI coordinates and GPU UUIDs are as recorded in the estate base seal 100.110.OCTO_W01_BASE_SEAL.md, where that machine metadata is intentionally public. Kimi-K3's byte count is the measured tensor payload, 1560860324864 B (1453.7 GiB). The declared state is deliberately truthful: no inference engine is installed on this host, and the Kimi-K3 weights are not resident on it - so residence is empty and runtimes is empty, and each of those is a refusal in its own right before capacity is ever reached. model.sha256 is a PLACEHOLDER digest, not a measurement: no Kimi-K3 object is held on this host, so there is nothing here whose identity could have been computed. It is present only because placement requires the field, and the refusal this manifest produces does not depend on its value.",
+  "cluster": {
+    "name": "octo-w01",
+    "nodes": [
+      {
+        "id": "octo-w01",
+        "host": "127.0.0.1",
+        "notes": "Single workstation. Two seats, two physically distinct boards.",
+        "runtimes": [],
+        "gpus": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 4060",
+            "vram_gb": 7.996,
+            "mem_bw_gbps": 272,
+            "uuid": "GPU-e0b1541d-fc7d-38f5-d4c0-c15a3bd241a0",
+            "pci_bus_id": "00000000:01:00.0"
+          },
+          {
+            "index": 1,
+            "name": "NVIDIA GeForce RTX 3090",
+            "vram_gb": 24.0,
+            "mem_bw_gbps": 936,
+            "uuid": "GPU-493239dc-f76e-bbbb-8e68-ffd34a5e7bbc",
+            "pci_bus_id": "00000000:25:00.0"
+          }
+        ]
+      }
+    ]
+  },
+  "model": {
+    "name": "kimi-k3",
+    "dtype": "fp8",
+    "kv_cache": "fp16",
+    "bytes": 1560860324864,
+    "sha256": "1c09f329b76cba892ce8ced7d8f23ce4752c3edd4868222d165127b38d21f0dc",
+    "engines": ["llamacpp", "vllm"],
+    "residence": []
+  },
+  "policy": {
+    "target_tps": 18,
+    "max_latency_ms": 250,
+    "prefer_bandwidth": true,
+    "allow_cpu_offload": false,
+    "reserve_gb_per_gpu": 4.0
+  }
+}

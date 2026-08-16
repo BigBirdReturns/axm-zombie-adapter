@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "result": "refusal",
+  "code": "NO_SUPPORTED_ENGINE",
+  "message": "Stage 0 is placed on node(s) octo-w01, which offer no runtime able to execute 'kimi-k3'. Device memory on a node that cannot execute the model is not placement capacity.",
+  "detail": {
+    "stage": 0,
+    "nodes": [
+      "octo-w01"
+    ],
+    "model_engines": [
+      "llamacpp",
+      "vllm"
+    ],
+    "node_runtimes": {
+      "octo-w01": []
+    }
+  }
+}

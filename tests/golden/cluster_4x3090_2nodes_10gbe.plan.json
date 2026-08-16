@@ -4,7 +4,9 @@
     "name": "llama-3-70b",
     "dtype": "q4",
     "kv_cache": "fp16",
-    "estimated_model_gb": 32.6
+    "estimated_model_gb": 32.6,
+    "model_size_bytes": 35000000000,
+    "model_object_sha256": "863a91e7b83b67c2781e40f95fa6416edf737f5e7908d0c4d6b321cfc0df3a3d"
   },
   "cluster": {
     "name": "zombie-2nodes",
@@ -19,7 +21,8 @@
         "gpu": 0,
         "name": "RTX_3090",
         "vram_gb": 24.0,
-        "mem_bw_gbps": 936
+        "mem_bw_gbps": 936,
+        "accelerator_uuid": "GPU-11111111-1111-4111-8111-111111111111"
       },
       {
         "node": "node-a",
@@ -27,7 +30,8 @@
         "gpu": 1,
         "name": "RTX_3090",
         "vram_gb": 24.0,
-        "mem_bw_gbps": 936
+        "mem_bw_gbps": 936,
+        "accelerator_uuid": "GPU-22222222-2222-4222-8222-222222222222"
       },
       {
         "node": "node-b",
@@ -35,7 +39,8 @@
         "gpu": 0,
         "name": "RTX_3090",
         "vram_gb": 24.0,
-        "mem_bw_gbps": 936
+        "mem_bw_gbps": 936,
+        "accelerator_uuid": "GPU-33333333-3333-4333-8333-333333333333"
       },
       {
         "node": "node-b",
@@ -43,7 +48,8 @@
         "gpu": 1,
         "name": "RTX_3090",
         "vram_gb": 24.0,
-        "mem_bw_gbps": 936
+        "mem_bw_gbps": 936,
+        "accelerator_uuid": "GPU-44444444-4444-4444-8444-444444444444"
       }
     ]
   },
@@ -82,6 +88,67 @@
       ]
     }
   ],
+  "placement_proof": {
+    "model_object_sha256": "863a91e7b83b67c2781e40f95fa6416edf737f5e7908d0c4d6b321cfc0df3a3d",
+    "weight_bytes": 35000000000,
+    "assigned_bytes_total": 35000000000,
+    "stages": [
+      {
+        "stage": 0,
+        "assigned_bytes": 17500000000,
+        "usable_bytes": 42949672960,
+        "devices": [
+          {
+            "node": "node-a",
+            "gpu": 0,
+            "accelerator_uuid": "GPU-11111111-1111-4111-8111-111111111111",
+            "assigned_bytes": 8750000000,
+            "usable_bytes": 21474836480,
+            "engine": "llamacpp",
+            "residence_verified": true
+          },
+          {
+            "node": "node-a",
+            "gpu": 1,
+            "accelerator_uuid": "GPU-22222222-2222-4222-8222-222222222222",
+            "assigned_bytes": 8750000000,
+            "usable_bytes": 21474836480,
+            "engine": "llamacpp",
+            "residence_verified": true
+          }
+        ]
+      },
+      {
+        "stage": 1,
+        "assigned_bytes": 17500000000,
+        "usable_bytes": 42949672960,
+        "devices": [
+          {
+            "node": "node-b",
+            "gpu": 0,
+            "accelerator_uuid": "GPU-33333333-3333-4333-8333-333333333333",
+            "assigned_bytes": 8750000000,
+            "usable_bytes": 21474836480,
+            "engine": "llamacpp",
+            "residence_verified": true
+          },
+          {
+            "node": "node-b",
+            "gpu": 1,
+            "accelerator_uuid": "GPU-44444444-4444-4444-8444-444444444444",
+            "assigned_bytes": 8750000000,
+            "usable_bytes": 21474836480,
+            "engine": "llamacpp",
+            "residence_verified": true
+          }
+        ]
+      }
+    ],
+    "diagnostics": {
+      "aggregate_usable_bytes": 85899345920,
+      "aggregate_is_not_an_admission_criterion": true
+    }
+  },
   "kv_cache_policy": {
     "reserve_gb_per_gpu": 4.0,
     "spill_allowed": false

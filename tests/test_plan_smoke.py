@@ -38,10 +38,31 @@ def test_yaml_and_json_singlebox_examples_agree():
     assert golden_check.plan_text(REPO / "examples" / "cluster_4x3090_singlebox.yaml") == \
         golden_check.plan_text(REPO / "examples" / "cluster_4x3090_singlebox.json")
 
+def test_yaml_and_json_2node_examples_agree():
+    # The JSON twin is what regenerates the 2-node golden, because JSON is the
+    # canonical dependency-free form (SPEC.md rule 6) and PyYAML is optional.
+    pytest.importorskip("yaml")
+    assert golden_check.plan_text(REPO / "examples" / "cluster_4x3090_2nodes_10gbe.yaml") == \
+        golden_check.plan_text(REPO / "examples" / "cluster_4x3090_2nodes_10gbe.json")
+
 def test_infeasible_model_rejected(tmp_path):
+    # WL-02: the refusal is typed, and it names the stage that cannot hold its
+    # own assigned bytes rather than reporting a pooled shortfall. Size comes
+    # from declared bytes now, so this enlarges the object rather than changing
+    # dtype.
+    from axm_zombie.placement import PlacementRefusal, REFUSAL_STAGE_DOES_NOT_FIT
+
     manifest = json.loads((REPO / "examples" / "cluster_4x3090_singlebox.json").read_text())
-    manifest["model"]["dtype"] = "fp32"  # 70B fp32 cannot fit 4x24GB
+    manifest["model"]["bytes"] = 1_560_860_324_864  # Kimi-K3, 1453.7 GiB
     p = tmp_path / "m.json"
     p.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="Insufficient VRAM"):
+    with pytest.raises(PlacementRefusal) as excinfo:
         build_plan(load_manifest(str(p)))
+    assert excinfo.value.code == REFUSAL_STAGE_DOES_NOT_FIT
+    assert excinfo.value.detail["deficit_bytes"] > 0
+
+def test_plan_assigns_every_weight_byte_to_a_named_device():
+    plan = build_plan(load_manifest(str(REPO / "examples" / "cluster_4x3090_singlebox.json")))
+    proof = plan["placement_proof"]
+    assigned = sum(d["assigned_bytes"] for s in proof["stages"] for d in s["devices"])
+    assert assigned == proof["weight_bytes"] == plan["model"]["model_size_bytes"]

@@ -9,6 +9,8 @@ from axm_zombie.replan import degrade_manifest
 
 REPO = Path(__file__).resolve().parent.parent
 
+DIGEST = "863a91e7b83b67c2781e40f95fa6416edf737f5e7908d0c4d6b321cfc0df3a3d"
+
 def _singlebox():
     return load_manifest(str(REPO / "examples" / "cluster_4x3090_singlebox.json"))
 
@@ -20,6 +22,7 @@ def _two_nodes(tmp_path):
                 {
                     "id": "node-a",
                     "host": "10.0.0.1",
+                    "runtimes": ["llamacpp"],
                     "gpus": [
                         {"index": 0, "vram_gb": 24, "mem_bw_gbps": 936},
                         {"index": 1, "vram_gb": 24, "mem_bw_gbps": 936},
@@ -29,6 +32,7 @@ def _two_nodes(tmp_path):
                 {
                     "id": "node-b",
                     "host": "10.0.0.2",
+                    "runtimes": ["llamacpp"],
                     "gpus": [
                         {"index": 0, "vram_gb": 24, "mem_bw_gbps": 936},
                         {"index": 1, "vram_gb": 24, "mem_bw_gbps": 936},
@@ -37,7 +41,20 @@ def _two_nodes(tmp_path):
                 },
             ],
         },
-        "model": {"name": "llama-3-70b", "dtype": "q4", "kv_cache": "fp16"},
+        # WL-02: placement consumes exact bytes and an object identity, and
+        # only places on nodes where that object is verifiably resident.
+        "model": {
+            "name": "llama-3-70b",
+            "dtype": "q4",
+            "kv_cache": "fp16",
+            "bytes": 35000000000,
+            "sha256": DIGEST,
+            "engines": ["llamacpp"],
+            "residence": [
+                {"node": "node-a", "verified": True, "sha256": DIGEST},
+                {"node": "node-b", "verified": True, "sha256": DIGEST},
+            ],
+        },
         "policy": {},
     }
     p = tmp_path / "two.json"
@@ -70,9 +87,14 @@ def test_lose_last_gpu_removes_node(tmp_path):
     assert [n["id"] for n in degraded["cluster"]["nodes"]] == ["node-a"]
 
 def test_lose_too_much_is_infeasible():
+    from axm_zombie.placement import PlacementRefusal, REFUSAL_STAGE_DOES_NOT_FIT
+
     degraded = degrade_manifest(_singlebox(), ["node-a:1", "node-a:2", "node-a:3"])
-    with pytest.raises(ValueError, match="Insufficient VRAM"):
+    with pytest.raises(PlacementRefusal) as excinfo:
         build_plan(degraded)
+    # The surviving seat is named, with the shortfall against its own memory.
+    assert excinfo.value.code == REFUSAL_STAGE_DOES_NOT_FIT
+    assert excinfo.value.detail["deficit_bytes"] > 0
 
 def test_unknown_node_rejected():
     with pytest.raises(ValueError, match="no node"):

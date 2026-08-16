@@ -1,8 +1,10 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from .manifest import load_manifest
+from .placement import PlacementRefusal
 from .planner import build_plan
 from .replan import degrade_manifest
 from .export.exo import export_exo
@@ -56,21 +58,36 @@ def main():
 
     args = parser.parse_args()
 
+    def emit(manifest, out, suffix=""):
+        """Write a plan, or write the refusal that replaced it.
+
+        A refusal is a real artifact, not an absent one. Writing it to the same
+        path a plan would have taken means the reason a placement did not
+        happen is recorded and diffable, instead of scrolling past in a
+        traceback.
+        """
+        out_path = Path(out)
+        try:
+            plan = build_plan(manifest)
+        except PlacementRefusal as refusal:
+            out_path.write_text(
+                json.dumps(refusal.to_dict(), indent=2) + "\n", encoding="utf-8"
+            )
+            print(f"REFUSED [{refusal.code}] {refusal.message}", file=sys.stderr)
+            print(f"Wrote refusal {out_path.resolve()}", file=sys.stderr)
+            raise SystemExit(2)
+        out_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+        print(f"Wrote {out_path.resolve()}{suffix}")
+        return plan
+
     if args.cmd == "plan":
-        manifest = load_manifest(args.manifest, strict=args.strict)
-        plan = build_plan(manifest)
-        out_path = Path(args.out)
-        out_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
-        print(f"Wrote {out_path.resolve()}")
+        emit(load_manifest(args.manifest, strict=args.strict), args.out)
         return
 
     if args.cmd == "replan":
         manifest = load_manifest(args.manifest, strict=args.strict)
         degraded = degrade_manifest(manifest, args.lose)
-        plan = build_plan(degraded)
-        out_path = Path(args.out)
-        out_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
-        print(f"Wrote {out_path.resolve()} (lost: {', '.join(args.lose)})")
+        emit(degraded, args.out, suffix=f" (lost: {', '.join(args.lose)})")
         if args.manifest_out:
             mo = Path(args.manifest_out)
             mo.write_text(json.dumps(degraded, indent=2), encoding="utf-8")
@@ -84,3 +101,10 @@ def main():
         EXPORTERS[args.target](plan, outdir)
         print(f"Wrote exporter artifacts to {outdir.resolve()}")
         return
+
+
+# Runnable as `python -m axm_zombie.cli ...` with nothing installed, which is
+# the same reason the resurrection test exists: the tool has to work from a
+# checkout alone.
+if __name__ == "__main__":
+    main()

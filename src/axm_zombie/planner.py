@@ -2,43 +2,30 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import math
 
-def _estimate_model_bytes(model_name: str, dtype: str) -> int:
-    name = model_name.lower()
-    if "70b" in name:
-        params = 70_000_000_000
-    elif "34b" in name:
-        params = 34_000_000_000
-    elif "13b" in name:
-        params = 13_000_000_000
-    elif "7b" in name:
-        params = 7_000_000_000
-    else:
-        params = 30_000_000_000
-    bytes_per_param = {
-        "fp32": 4.0,
-        "fp16": 2.0,
-        "bf16": 2.0,
-        "fp8": 1.0,
-        "int8": 1.0,
-        "q8": 1.0,
-        "int4": 0.5,
-        "q4": 0.5,
-    }.get(dtype.lower(), 2.0)
-    return int(params * bytes_per_param)
+from .placement import (
+    BYTES_PER_GB,
+    PlacementRefusal,
+    build_seats,
+    prove_placement,
+    resolve_exact_weight_bytes,
+    resolve_model_identity,
+)
+
+# WL-02 removed `_estimate_model_bytes` rather than keeping it beside the exact
+# path. It inferred a parameter count from the model name and fell through to a
+# silent 30B default for anything it did not recognise, then that number
+# authorized a GPU placement. The resulting plan was byte-identical in shape to
+# a correct one, so the guess was never surfaced as uncertainty - it was
+# surfaced as a placement. Nothing here may size a placement from a name again;
+# `placement.resolve_exact_weight_bytes` refuses instead.
 
 def _cluster_gpus(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
-    gpus: List[Dict[str, Any]] = []
-    for node in manifest["cluster"]["nodes"]:
-        for gpu in node["gpus"]:
-            gpus.append({
-                "node": node["id"],
-                "host": node.get("host"),
-                "gpu": int(gpu["index"]),
-                "name": gpu.get("name", "GPU"),
-                "vram_gb": float(gpu["vram_gb"]),
-                "mem_bw_gbps": gpu.get("mem_bw_gbps"),
-            })
-    return gpus
+    """Seats in the cluster, with declared physical-accelerator identity.
+
+    Kept as the plan's `cluster.gpus` shape. `build_seats` adds
+    `accelerator_uuid` and refuses a manifest that seats one board twice.
+    """
+    return build_seats(manifest)
 
 def _link_bw_between(manifest: Dict[str, Any], a: str, b: str) -> float:
     if a == b:
@@ -71,16 +58,18 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
     policy = manifest["policy"]
     gpus = _cluster_gpus(manifest)
 
-    total_vram = sum(g["vram_gb"] for g in gpus)
-    model_bytes = _estimate_model_bytes(model["name"], model["dtype"])
-    model_gb = model_bytes / (1024**3)
+    # Placement is authorized by the measured object or not at all.
+    model_bytes = resolve_exact_weight_bytes(model)
+    model_identity = resolve_model_identity(model)
+    model_gb = model_bytes / BYTES_PER_GB
 
     reserve_gb_per_gpu = float(policy.get("reserve_gb_per_gpu", 4.0))
-    usable_vram = max(0.0, total_vram - reserve_gb_per_gpu * len(gpus))
-    if usable_vram < model_gb * 1.05:
-        raise ValueError(
-            f"Insufficient VRAM for rough model estimate. Usable ~{usable_vram:.1f} GB, model ~{model_gb:.1f} GB."
-        )
+
+    # There is deliberately no pooled-capacity gate here. The v1 planner
+    # admitted a placement when `sum(vram) - reserve * count` cleared the model
+    # size, which is a claim about an address space that does not exist. The
+    # proof below assigns every byte to a named device and checks each stage
+    # against its own seats instead.
 
     node_ids = sorted(list({g["node"] for g in gpus}))
     multi_node = len(node_ids) > 1
@@ -112,6 +101,10 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
             )
         )
 
+    placement_proof = prove_placement(
+        manifest, stages, model_bytes, model_identity, reserve_gb_per_gpu
+    )
+
     return {
         "schema_version": 1,
         "model": {
@@ -119,6 +112,8 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
             "dtype": model["dtype"],
             "kv_cache": model.get("kv_cache", model["dtype"]),
             "estimated_model_gb": round(model_gb, 2),
+            "model_size_bytes": model_bytes,
+            "model_object_sha256": model_identity,
         },
         "cluster": {
             "name": manifest["cluster"].get("name", "zombie"),
@@ -130,6 +125,7 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
             {"stage": i, "placement": [{"node": g["node"], "gpu": g["gpu"]} for g in stage]}
             for i, stage in enumerate(stages)
         ],
+        "placement_proof": placement_proof,
         "kv_cache_policy": {
             "reserve_gb_per_gpu": reserve_gb_per_gpu,
             "spill_allowed": bool(policy.get("allow_cpu_offload", False)),
