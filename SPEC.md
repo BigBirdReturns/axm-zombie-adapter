@@ -67,9 +67,14 @@ Each link:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `name` | string | yes | Model identifier; used for coarse size estimation |
+| `name` | string | yes | Model identifier; used for coarse size estimation when no size is declared |
 | `dtype` | string | yes | Weight precision: `fp32`, `fp16`, `bf16`, `fp8`, `int8`, `q8`, `int4`, `q4` |
 | `kv_cache` | string | no (default: `dtype`) | KV-cache precision |
+| `params` | integer | no | Total parameter count. For a mixture-of-experts model this is the **total**, not per-expert |
+| `bytes` | integer | no | Exact on-disk weight size in bytes. Highest precedence |
+
+Size precedence is `bytes`, then `params` × bytes-per-parameter, then inference
+from `name`. A declared size always wins over the name.
 
 ### `policy`
 
@@ -117,9 +122,28 @@ A plan is a JSON object. Version 1 keys:
 
 ## Reference model-size estimation (informative, not normative)
 
-The v1 reference planner estimates parameter count from the model name
-(`70b`, `34b`, `13b`, `7b` substrings; otherwise 30B) and multiplies by
-bytes-per-parameter for `dtype` (4 for fp32; 2 for fp16/bf16 and unknown
-dtypes; 1 for fp8/int8/q8; 0.5 for int4/q4). Feasibility requires usable VRAM
-(total minus per-GPU reserve) ≥ 1.05 × estimated model size. Future planners
-may estimate differently; the manifest and plan schemas do not change for it.
+The v1 reference planner resolves model size in this order:
+
+1. `model.bytes`, used exactly;
+2. `model.params` × bytes-per-parameter for `dtype`;
+3. inference from `model.name` via the `70b`, `34b`, `13b`, `7b` substrings
+   (checked longest-first, so `70b` is not shadowed by `7b`).
+
+Bytes-per-parameter is 4 for fp32; 2 for fp16/bf16 and unknown dtypes; 1 for
+fp8/int8/q8; 0.5 for int4/q4. Feasibility requires usable VRAM (total minus
+per-GPU reserve) ≥ 1.05 × model size.
+
+If none of the three resolve, the planner **raises rather than assuming a
+default**. It also refuses a name carrying a mixture-of-experts multiplier
+(`8x7b`, `4x22b`), because a bare parameter substring understates such a model
+by roughly its expert count. Both refusals name the model and ask for `params`
+or `bytes`.
+
+This refusal is deliberate. A wrong size estimate is not surfaced as an error;
+it is surfaced as a confident placement plan that is byte-identical in shape to
+a correct one and OOMs on contact with real hardware. Earlier versions defaulted
+to 30B, which silently produced such plans — a 1.42 TiB model estimated at
+27.94 GB and placed across four 24 GB GPUs.
+
+Future planners may estimate differently; the manifest and plan schemas do not
+change for it.
