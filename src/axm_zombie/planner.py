@@ -1,30 +1,68 @@
 from __future__ import annotations
 from typing import Any, Dict, List
 import math
+import re
 
-def _estimate_model_bytes(model_name: str, dtype: str) -> int:
-    name = model_name.lower()
-    if "70b" in name:
-        params = 70_000_000_000
-    elif "34b" in name:
-        params = 34_000_000_000
-    elif "13b" in name:
-        params = 13_000_000_000
-    elif "7b" in name:
-        params = 7_000_000_000
-    else:
-        params = 30_000_000_000
-    bytes_per_param = {
-        "fp32": 4.0,
-        "fp16": 2.0,
-        "bf16": 2.0,
-        "fp8": 1.0,
-        "int8": 1.0,
-        "q8": 1.0,
-        "int4": 0.5,
-        "q4": 0.5,
-    }.get(dtype.lower(), 2.0)
-    return int(params * bytes_per_param)
+_BYTES_PER_PARAM = {
+    "fp32": 4.0,
+    "fp16": 2.0,
+    "bf16": 2.0,
+    "fp8": 1.0,
+    "int8": 1.0,
+    "q8": 1.0,
+    "int4": 0.5,
+    "q4": 0.5,
+}
+
+# Ordered longest-first so "70b" is not shadowed by "7b".
+_KNOWN_PARAMS = (
+    ("70b", 70_000_000_000),
+    ("34b", 34_000_000_000),
+    ("13b", 13_000_000_000),
+    ("7b", 7_000_000_000),
+)
+
+# "8x7b", "4 x 22b": a mixture-of-experts multiplier makes a bare parameter
+# substring a lie. mixtral-8x7b is ~46.7B, not 7B.
+_MOE_MULTIPLIER = re.compile(r"\d+\s*x\s*\d+\s*b\b")
+
+
+def _bytes_per_param(dtype: str) -> float:
+    return _BYTES_PER_PARAM.get(str(dtype).lower(), 2.0)
+
+
+def _estimate_model_bytes(model: Dict[str, Any]) -> int:
+    """Model size in bytes.
+
+    Declared size always wins over inference from the name. When the size can be
+    neither declared nor inferred unambiguously, this refuses instead of
+    guessing: a wrong guess here is emitted as a confident placement plan that
+    OOMs on contact with real hardware.
+    """
+    dtype = model.get("dtype", "")
+    name = str(model.get("name", ""))
+
+    if model.get("bytes") is not None:
+        return int(model["bytes"])
+    if model.get("params") is not None:
+        return int(float(model["params"]) * _bytes_per_param(dtype))
+
+    lowered = name.lower()
+    if _MOE_MULTIPLIER.search(lowered):
+        raise ValueError(
+            f"Model {name!r} carries a mixture-of-experts multiplier, so its "
+            "parameter count cannot be read from its name. Declare model.params "
+            "(total parameters, not per-expert) or model.bytes in the manifest."
+        )
+    for token, params in _KNOWN_PARAMS:
+        if token in lowered:
+            return int(params * _bytes_per_param(dtype))
+    raise ValueError(
+        f"Unknown model size for {name!r}. The planner will not assume a "
+        "default parameter count, because the resulting plan would look "
+        "identical to a correct one. Declare model.params or model.bytes "
+        "in the manifest."
+    )
 
 def _cluster_gpus(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
     gpus: List[Dict[str, Any]] = []
@@ -72,7 +110,7 @@ def build_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
     gpus = _cluster_gpus(manifest)
 
     total_vram = sum(g["vram_gb"] for g in gpus)
-    model_bytes = _estimate_model_bytes(model["name"], model["dtype"])
+    model_bytes = _estimate_model_bytes(model)
     model_gb = model_bytes / (1024**3)
 
     reserve_gb_per_gpu = float(policy.get("reserve_gb_per_gpu", 4.0))
