@@ -56,17 +56,93 @@
     return data;
   }
 
-  function estimateModelBytes(modelName, dtype) {
-    const name = modelName.toLowerCase();
-    let params;
-    if (name.includes("70b")) params = 70e9;
-    else if (name.includes("34b")) params = 34e9;
-    else if (name.includes("13b")) params = 13e9;
-    else if (name.includes("7b")) params = 7e9;
-    else params = 30e9;
+  const SIZE_SOURCE_MANIFEST_BYTES = "manifest_bytes";
+  const SIZE_SOURCE_MANIFEST_PARAMS = "manifest_params_and_quantization";
+  const SIZE_SOURCE_NAME_HEURISTIC = "legacy_name_heuristic";
+
+  // Two declared size claims disagreeing by this factor or more are a
+  // contradiction, not a precedence question. See planner.py.
+  const SIZE_CONFLICT_FACTOR = 10.0;
+
+  // Longest-first so "70b" is not shadowed by "7b".
+  const KNOWN_PARAMS = [
+    ["70b", 70e9],
+    ["34b", 34e9],
+    ["13b", 13e9],
+    ["7b", 7e9],
+  ];
+
+  // "8x7b", "4 x 22b": a mixture-of-experts multiplier makes a bare parameter
+  // substring a lie. mixtral-8x7b is ~46.7B, not 7B.
+  const MOE_MULTIPLIER = /\d+\s*x\s*\d+\s*b\b/;
+
+  function bytesPerParam(dtype) {
     const table = { fp32: 4.0, fp16: 2.0, bf16: 2.0, fp8: 1.0, int8: 1.0, q8: 1.0, int4: 0.5, q4: 0.5 };
-    const bpp = table[dtype.toLowerCase()] !== undefined ? table[dtype.toLowerCase()] : 2.0;
-    return Math.trunc(params * bpp);
+    const key = String(dtype).toLowerCase();
+    return table[key] !== undefined ? table[key] : 2.0;
+  }
+
+  function refuseContradictorySizeClaims(name, declared, params, implied, dtype) {
+    const lo = Math.min(declared, implied);
+    const hi = Math.max(declared, implied);
+    const ratio = lo <= 0 ? Infinity : hi / lo;
+    if (ratio < SIZE_CONFLICT_FACTOR) return;
+    const gap = ratio === Infinity ? "unbounded" : `${ratio.toFixed(1)}x`;
+    throw new Error(
+      `Size-claim conflict for '${name}': model.bytes declares ${declared} B, ` +
+      `but model.params (${params}) at ${bytesPerParam(dtype)} bytes/param for ` +
+      `dtype '${dtype}' implies ${implied} B - a ${gap} disagreement. The ` +
+      "planner will not pick a winner between two contradictory claims, " +
+      "because a stale size field produces a confident plan that OOMs. " +
+      "Correct model.bytes or model.params so the two agree within a factor " +
+      `of ${SIZE_CONFLICT_FACTOR.toFixed(0)}.`
+    );
+  }
+
+  // Returns { bytes, source }. Declared size always wins over the name, and an
+  // unresolvable size refuses rather than defaulting: a wrong guess is emitted
+  // as a confident placement plan that OOMs on contact with real hardware.
+  function resolveModelSize(model) {
+    const name = String(model.name);
+    const dtype = model.dtype;
+    const declaredBytes = model.bytes !== undefined && model.bytes !== null ? model.bytes : null;
+    const declaredParams = model.params !== undefined && model.params !== null ? model.params : null;
+
+    if (declaredBytes !== null) {
+      const size = Math.trunc(Number(declaredBytes));
+      if (declaredParams !== null) {
+        const implied = Math.trunc(Number(declaredParams) * bytesPerParam(dtype));
+        refuseContradictorySizeClaims(name, size, declaredParams, implied, dtype);
+      }
+      return { bytes: size, source: SIZE_SOURCE_MANIFEST_BYTES };
+    }
+
+    if (declaredParams !== null) {
+      return {
+        bytes: Math.trunc(Number(declaredParams) * bytesPerParam(dtype)),
+        source: SIZE_SOURCE_MANIFEST_PARAMS,
+      };
+    }
+
+    const lowered = name.toLowerCase();
+    if (MOE_MULTIPLIER.test(lowered)) {
+      throw new Error(
+        `Model '${name}' carries a mixture-of-experts multiplier, so its ` +
+        "parameter count cannot be read from its name. Declare model.params " +
+        "(total parameters, not per-expert) or model.bytes in the manifest."
+      );
+    }
+    for (const [token, params] of KNOWN_PARAMS) {
+      if (lowered.includes(token)) {
+        return { bytes: Math.trunc(params * bytesPerParam(dtype)), source: SIZE_SOURCE_NAME_HEURISTIC };
+      }
+    }
+    throw new Error(
+      `Unknown model size for '${name}'. The planner will not assume a ` +
+      "default parameter count, because the resulting plan would look " +
+      "identical to a correct one. Declare model.params or model.bytes " +
+      "in the manifest."
+    );
   }
 
   function clusterGpus(manifest) {
@@ -120,14 +196,16 @@
     const gpus = clusterGpus(manifest);
 
     const totalVram = gpus.reduce((s, g) => s + g.vram_gb, 0);
-    const modelBytes = estimateModelBytes(model.name, model.dtype);
+    const resolved = resolveModelSize(model);
+    const modelBytes = resolved.bytes;
     const modelGb = modelBytes / Math.pow(1024, 3);
 
     const reserve = Number(policy.reserve_gb_per_gpu !== undefined ? policy.reserve_gb_per_gpu : 4.0);
     const usableVram = Math.max(0.0, totalVram - reserve * gpus.length);
     if (usableVram < modelGb * 1.05) {
       throw new Error(
-        `Insufficient VRAM for rough model estimate. Usable ~${usableVram.toFixed(1)} GB, model ~${modelGb.toFixed(1)} GB.`
+        `Insufficient VRAM for rough model estimate. Usable ~${usableVram.toFixed(1)} GB, ` +
+        `model ~${modelGb.toFixed(1)} GB (size ${modelBytes} B from ${resolved.source}).`
       );
     }
 
@@ -168,6 +246,9 @@
         dtype: model.dtype,
         kv_cache: model.kv_cache !== undefined ? model.kv_cache : model.dtype,
         estimated_model_gb: Math.round(modelGb * 100) / 100,
+        model_size_bytes: modelBytes,
+        model_size_source: resolved.source,
+        model_object_sha256: model.sha256 !== undefined ? model.sha256 : null,
       },
       cluster: {
         name: manifest.cluster.name !== undefined ? manifest.cluster.name : "zombie",
