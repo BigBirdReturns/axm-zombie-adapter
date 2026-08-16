@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "result": "refusal",
+  "code": "UNVERIFIED_MODEL_IDENTITY",
+  "message": "model.identity for 'kimi-k3' declares identity_state='UNVERIFIED_HERE'. Placement authority requires 'VERIFIED': a digest that has been written down, or pointed at, but not verified in this reader's evidence is a claim about an object, and a claim cannot authorize putting bytes on a device.",
+  "detail": {
+    "model": "kimi-k3",
+    "identity_state": "UNVERIFIED_HERE",
+    "identity_scheme": "estate/object-residence@1",
+    "identity_source": "private evidence packet: estate evidence/rung1a-20260816/octo-w01-qualify-corrected.json (schema estate/object-residence@1, 96 weight files, 1560936091448 checkpoint-set bytes). Not reproduced here: exporting a digest from a private custody packet into a public repository is a disclosure decision, not a planning one."
+  }
+}

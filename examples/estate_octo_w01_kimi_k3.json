@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "_note": "A REAL host, not a fixture. OCTO-W01 is the estate workstation; the two accelerator seats, their VRAM, PCI coordinates and GPU UUIDs are as recorded in the estate base seal 100.110.OCTO_W01_BASE_SEAL.md, where that machine metadata is intentionally public. The three weight quantities are the estate's own measurement of Kimi-K3 and they close exactly: tensor payload 1560860324864 B plus safetensors container headers 75766584 B is the complete 96-shard checkpoint set 1560936091448 B. What this manifest deliberately does NOT carry is the object digest. An accepted Rung 1A identity for this weight set exists, under scheme estate/object-residence@1, in a PRIVATE evidence repository; identity_source below names exactly where. Copying that digest into a public repository would export custody evidence from a private packet, so model.identity declares identity_state UNVERIFIED_HERE and the planner refuses with UNVERIFIED_MODEL_IDENTITY. That refusal is the honest artifact. A syntactically valid invented digest would be worse than no digest at all, because a downstream reader could not tell it from real custody.",
+  "cluster": {
+    "name": "octo-w01",
+    "nodes": [
+      {
+        "id": "octo-w01",
+        "host": "127.0.0.1",
+        "notes": "Single workstation. Two seats, two physically distinct boards.",
+        "runtimes": [],
+        "gpus": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 4060",
+            "vram_gb": 7.996,
+            "mem_bw_gbps": 272,
+            "uuid": "GPU-e0b1541d-fc7d-38f5-d4c0-c15a3bd241a0",
+            "pci_bus_id": "00000000:01:00.0"
+          },
+          {
+            "index": 1,
+            "name": "NVIDIA GeForce RTX 3090",
+            "vram_gb": 24.0,
+            "mem_bw_gbps": 936,
+            "uuid": "GPU-493239dc-f76e-bbbb-8e68-ffd34a5e7bbc",
+            "pci_bus_id": "00000000:25:00.0"
+          }
+        ]
+      }
+    ]
+  },
+  "model": {
+    "name": "kimi-k3",
+    "dtype": "fp8",
+    "kv_cache": "fp16",
+    "bytes": 1560860324864,
+    "weights": {
+      "checkpoint_set_bytes": 1560936091448,
+      "tensor_payload_bytes": 1560860324864,
+      "container_overhead_bytes": 75766584
+    },
+    "identity": {
+      "identity_scheme": "estate/object-residence@1",
+      "identity_digest": "",
+      "identity_source": "private evidence packet: estate evidence/rung1a-20260816/octo-w01-qualify-corrected.json (schema estate/object-residence@1, 96 weight files, 1560936091448 checkpoint-set bytes). Not reproduced here: exporting a digest from a private custody packet into a public repository is a disclosure decision, not a planning one.",
+      "identity_state": "UNVERIFIED_HERE",
+      "verified_at": "",
+      "validator": ""
+    },
+    "engines": ["llamacpp", "vllm"],
+    "sharding_strategy": "pipeline",
+    "residence": [
+      {
+        "node": "octo-w01",
+        "verified": false,
+        "freshness": "CURRENT",
+        "path": "recorded in the private evidence packet named by model.identity.identity_source",
+        "validator": "estate object-residence qualifier",
+        "_note": "Left unverified here for the same reason the digest is absent: residence is verified against an object digest, and this repository does not hold one. The private packet records this object as VERIFIED and CURRENT on this host."
+      }
+    ]
+  },
+  "policy": {
+    "target_tps": 18,
+    "max_latency_ms": 250,
+    "prefer_bandwidth": true,
+    "allow_cpu_offload": false,
+    "reserve_gb_per_gpu": 4.0
+  }
+}

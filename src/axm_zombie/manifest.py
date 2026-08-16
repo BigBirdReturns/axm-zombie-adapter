@@ -55,6 +55,10 @@ def load_manifest(path: str, strict: bool = False) -> Dict[str, Any]:
         node.setdefault("links", [])
         node.setdefault("notes", "")
         node.setdefault("host", None)
+        # Engines installed on this node. A node offering none cannot execute a
+        # model however much VRAM it has, so placement treats its memory as
+        # unavailable rather than as capacity.
+        node.setdefault("runtimes", [])
 
     model = data["model"]
     for req in ["name", "dtype"]:

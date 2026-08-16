@@ -1,30 +1,64 @@
+# Illustrative fixture. The object placed here is the ASCII string
+# 'example-model-object:llama-3-70b-q4'. model.identity.identity_scheme says so
+# (example/ascii-label-object@1), so the digest is reproducible by anyone and
+# is not custody of real model weights.
 cluster:
   name: zombie-singlebox
   nodes:
     - id: node-a
       host: 127.0.0.1
+      runtimes:
+        - engine: llamacpp
+          compatibility: MEASURED
       gpus:
         - index: 0
           name: RTX_3090
           vram_gb: 24
           mem_bw_gbps: 936
+          uuid: GPU-11111111-1111-4111-8111-111111111111
         - index: 1
           name: RTX_3090
           vram_gb: 24
           mem_bw_gbps: 936
+          uuid: GPU-22222222-2222-4222-8222-222222222222
         - index: 2
           name: RTX_3090
           vram_gb: 24
           mem_bw_gbps: 936
+          uuid: GPU-33333333-3333-4333-8333-333333333333
         - index: 3
           name: RTX_3090
           vram_gb: 24
           mem_bw_gbps: 936
+          uuid: GPU-44444444-4444-4444-8444-444444444444
 
 model:
   name: llama-3-70b
   dtype: q4
   kv_cache: fp16
+  bytes: 35000000000
+  sha256: b55515f6bff0e4efbca1fe74c68bf4ec5762f70e787d544586b702a6843caf71
+  weights:
+    checkpoint_set_bytes: 35008388608
+    tensor_payload_bytes: 35000000000
+    container_overhead_bytes: 8388608
+  identity:
+    identity_scheme: example/ascii-label-object@1
+    identity_digest: b55515f6bff0e4efbca1fe74c68bf4ec5762f70e787d544586b702a6843caf71
+    identity_source: examples/cluster_4x3090_singlebox.json#_note
+    identity_state: VERIFIED
+    verified_at: "2026-08-16T00:00:00Z"
+    validator: sha256 over the ASCII label named in _note
+  engines: [llamacpp]
+  sharding_strategy: pipeline
+  residence:
+    - node: node-a
+      verified: true
+      freshness: CURRENT
+      identity_digest: b55515f6bff0e4efbca1fe74c68bf4ec5762f70e787d544586b702a6843caf71
+      path: /srv/models/llama-3-70b-q4.gguf
+      verified_at: "2026-08-16T00:00:00Z"
+      validator: example fixture
 
 policy:
   target_tps: 18

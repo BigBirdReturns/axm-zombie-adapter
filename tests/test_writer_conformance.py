@@ -22,6 +22,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
+from axm_zombie.placement import PlacementRefusal  # noqa: E402
 from axm_zombie.planner import build_plan  # noqa: E402
 
 MARKERS = [
@@ -39,17 +40,53 @@ MARKERS = [
 CASES = json.loads((REPO / "tests" / "conformance_cases.json").read_text(encoding="utf-8"))
 
 
-def manifest_for(model):
+# Named clusters, so a case can select the hardware its predicate is about
+# without every case restating four GPUs. The default one is deliberately bare:
+# no board identities and no runtimes, which is what a manifest written before
+# placement evidence existed looks like.
+#
+# The digests in the case table are sha-256 of the ASCII labels
+# "witness-model-object:llama-3-70b-q4" and
+# "witness-model-object:a-different-object", the same labels the Python and
+# browser witnesses use. Nothing here is an invented digest.
+DUPLICATE_BOARD = "GPU-493239dc-f76e-bbbb-8e68-ffd34a5e7bbc"
+
+
+def _gpus(uuids=None):
+    gpus = []
+    for i in range(4):
+        gpu = {"index": i, "name": "RTX_3090", "vram_gb": 24, "mem_bw_gbps": 936}
+        if uuids is not None:
+            gpu["uuid"] = uuids[i]
+        gpus.append(gpu)
+    return gpus
+
+
+_DISTINCT = [f"GPU-aaaa1111-0000-4000-8000-00000000000{i}" for i in range(4)]
+_MEASURED = [{"engine": "llamacpp", "compatibility": "MEASURED"}]
+
+CLUSTERS = {
+    None: {"gpus": _gpus(), "runtimes": []},
+    "evidenced": {"gpus": _gpus(_DISTINCT), "runtimes": _MEASURED},
+    "duplicate-board": {
+        "gpus": _gpus(_DISTINCT[:2] + [DUPLICATE_BOARD, DUPLICATE_BOARD]),
+        "runtimes": _MEASURED,
+    },
+    "no-runtime": {"gpus": _gpus(_DISTINCT), "runtimes": []},
+    "unmeasured-runtime": {"gpus": _gpus(_DISTINCT), "runtimes": ["llamacpp"]},
+}
+
+
+def manifest_for(model, cluster=None):
+    shape = CLUSTERS[cluster]
     return {
         "schema_version": 1,
         "cluster": {
             "name": "t",
             "nodes": [{
                 "id": "node-a", "host": "127.0.0.1",
-                "gpus": [
-                    {"index": i, "name": "RTX_3090", "vram_gb": 24, "mem_bw_gbps": 936}
-                    for i in range(4)
-                ],
+                "runtimes": list(shape["runtimes"]),
+                "gpus": [dict(g) for g in shape["gpus"]],
             }],
         },
         "model": dict(model),
@@ -58,20 +95,30 @@ def manifest_for(model):
     }
 
 
-def python_outcome(model):
-    """The complete emitted model object, or the refusal that replaced it.
+def python_outcome(case):
+    """The complete emitted placement artifact, or the refusal that replaced it.
 
-    Deliberately not a projection. Selecting `gb`, `source`, and `sha` left
-    `model_size_bytes` -- the exact number the placement was authorized
-    against -- outside the comparison, so the two writers could publish
-    different byte counts and still agree on every field this table checked.
-    Whatever the schema says the model object contains is what gets compared.
+    Deliberately not a projection. An earlier version of this table selected
+    `gb`, `source`, and `sha`, which left `model_size_bytes` -- the exact
+    number the placement was authorized against -- outside the comparison
+    entirely, so the two writers could publish different byte counts and still
+    agree on every field this table checked. Now the complete model object and
+    the complete placement decision are both compared.
+
+    A typed refusal is compared by `code`, which is the machine-readable
+    contract; prose cannot be compared across runtimes, so the marker set is
+    kept as a secondary check for the untyped size-authority refusals that
+    have no code.
     """
     try:
-        plan = build_plan(manifest_for(model))
+        plan = build_plan(manifest_for(case["model"], case.get("cluster")))
+    except PlacementRefusal as refusal:
+        return {"kind": "refuse", "code": refusal.code,
+                "markers": sorted(m for m in MARKERS if m in str(refusal))}
     except ValueError as e:
-        return {"kind": "refuse", "markers": sorted(m for m in MARKERS if m in str(e))}
-    return {"kind": "plan", "model": plan["model"]}
+        return {"kind": "refuse", "code": None,
+                "markers": sorted(m for m in MARKERS if m in str(e))}
+    return {"kind": "plan", "model": plan["model"], "placement": plan["placement"]}
 
 
 @pytest.fixture(scope="module")
@@ -106,7 +153,7 @@ MODEL_OBJECT_KEYS = {
 @pytest.mark.parametrize("case", CASES, ids=[c["id"] for c in CASES])
 def test_both_writers_agree(case, browser_outcomes):
     assert case["id"] in browser_outcomes, "browser writer produced no outcome for this case"
-    outcome = python_outcome(case["model"])
+    outcome = python_outcome(case)
     if outcome["kind"] == "plan":
         assert set(outcome["model"]) == MODEL_OBJECT_KEYS, (
             "the plan's model object gained or lost a field; update "
